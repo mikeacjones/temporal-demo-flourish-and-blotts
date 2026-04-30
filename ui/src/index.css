@@ -1,0 +1,20 @@
+@import "tailwindcss";
+
+:root {
+  --hp-navy: #1a1f3a;
+  --hp-gold: #c9a84c;
+  --hp-parchment: #f5f0e8;
+  --hp-dark-red: #8b0000;
+  --hp-green: #2d6a2d;
+  --hp-purple: #4a1942;
+}
+
+body {
+  font-family: 'Crimson Text', Georgia, serif;
+  background-color: var(--hp-parchment);
+  color: #2a1a0a;
+}
+
+h1, h2, h3, .font-display {
+  font-family: 'Cinzel', serif;
+}

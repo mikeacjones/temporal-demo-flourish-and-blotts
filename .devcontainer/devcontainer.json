@@ -1,0 +1,32 @@
+{
+  "name": "Flourish & Blotts OMS",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    }
+  },
+  "forwardPorts": [3000, 8000, 8233, 7233],
+  "portsAttributes": {
+    "3000": { "label": "Storefront UI", "onAutoForward": "openBrowser" },
+    "8000": { "label": "OMS API" },
+    "8233": { "label": "Temporal Web UI", "onAutoForward": "notify" },
+    "7233": { "label": "Temporal gRPC" }
+  },
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "postStartCommand": "bash scripts/start-codespace.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "bradlc.vscode-tailwindcss",
+        "dbaeumer.vscode-eslint"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  }
+}

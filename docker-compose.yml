@@ -1,0 +1,80 @@
+services:
+  # Temporal runs on the host via `temporal server start-dev` (see `make dev`).
+  # Containers reach it through `host.docker.internal:7233` — Docker Desktop provides
+  # this DNS name automatically on macOS/Windows, and on Linux the extra_hosts entry
+  # below maps it to the host-gateway.
+  #
+  # Intra-container traffic uses service names (api, mailhog).
+  # Customer-clickable URLs (email links, UI deep links to Temporal/MailHog) use
+  # localhost:PORT — the customer's browser runs on the host.
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    env_file: .env
+    environment:
+      - TEMPORAL_HOST=host.docker.internal:7233
+      - SMTP_HOST=mailhog
+      - SMTP_PORT=1025
+      # Intra-container traffic uses service names — `localhost` here would
+      # resolve to the worker container itself, not the API. The worker calls
+      # /api/inventory/{reserve,release,adjust} for the canonical inventory
+      # store, so this needs to point at the api service.
+      - API_BASE_URL=http://api:8000
+      # Public-facing URL for customer-clickable links the worker emails out
+      # (Approve/Deny in CustomerConfirmationWorkflow). The customer clicks
+      # from a host browser, which can't resolve the `api` docker-network
+      # name — so this MUST be the host-mapped URL (port 8000 on host).
+      - API_PUBLIC_URL=http://localhost:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - mailhog
+      - api
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    env_file: .env
+    environment:
+      - TEMPORAL_HOST=host.docker.internal:7233
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  slack-bot:
+    build:
+      context: .
+      dockerfile: slack_bot/Dockerfile
+    env_file: .env
+    environment:
+      - TEMPORAL_HOST=host.docker.internal:7233
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  mailhog:
+    # Fake SMTP + web inbox for customer HITL emails.
+    image: mailhog/mailhog:latest
+    ports:
+      - "1025:1025"   # SMTP (host access, not strictly required)
+      - "8025:8025"   # Web UI — how you read the captured emails
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: .
+      dockerfile: ui/Dockerfile
+      args:
+        - VITE_TEMPORAL_UI_URL=${TEMPORAL_UI_URL:-http://localhost:8233}
+        - VITE_MAILHOG_UI_URL=${MAILHOG_UI_URL:-http://localhost:8025}
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped
