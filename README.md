@@ -27,31 +27,7 @@ that enforces governance policies (e.g. "every mutating tool must carry a human-
 guard") at module-import time. Adding a new mutating tool without an approval guard fails the
 worker on startup — the policy can't be skipped by the LLM.
 
-```
-   ┌──────────────────────────────────────────────────────┐
-   │  Customer places order via UI                        │
-   └──────────────────────┬───────────────────────────────┘
-                          ▼
-   ┌──────────────────────────────────────────────────────┐
-   │  OrderWorkflow (saga)                                │
-   │  process_payment → verify_credentials                │
-   │   → pick_and_pack → dispatch_delivery                │
-   └──────────────────────┬───────────────────────────────┘
-                  step fails│
-                          ▼
-   ┌──────────────────────────────────────────────────────┐
-   │  OrderRepairWorkflow (agentic)                       │
-   │  Claude loops on call_claude → tool_use → repeat     │
-   │  Tools dispatched through declarative harness        │
-   └─────┬───────────────────┬───────────────────┬────────┘
-         │                   │                   │
-         ▼ auto-resolve      ▼ ask customer      ▼ escalate
-   ┌─────────────┐  ┌──────────────────┐  ┌──────────────────┐
-   │ tool calls  │  │ CustomerConfirm  │  │ SlackConversation│
-   │ run; agent  │  │ Workflow         │  │ Workflow         │
-   │ returns     │  │ (email + page)   │  │ (multi-turn ops) │
-   └─────────────┘  └──────────────────┘  └──────────────────┘
-```
+![agentic oms repair diagram](./.media/diagram.svg)
 
 ---
 
