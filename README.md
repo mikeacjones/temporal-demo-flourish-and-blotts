@@ -1,3 +1,11 @@
+## Credits
+
+Brainstormed and planned by Michael Jones + Joshua Smith. 
+
+Built collaboratively with Claude using the [Temporal developer skill](https://temporal.io/blog/introducing-temporal-developer-skill).
+
+---
+
 # Flourish & Blotts — Temporal OMS with Agentic Repair
 
 A working Temporal demo: a wizarding-themed bookshop's order management system, with an
@@ -448,10 +456,3 @@ The demo is intentionally narrow.
 - **Idempotency keys are in-process.** `cancel_order`/`adjust_inventory` cache `tool_use_id`
   in a worker-local dict. Restart the worker and that protection is gone. Production would
   use a real KV / database.
-
----
-
-## Credits
-
-Brainstormed and planned by Michael Jones + Joshua Smith. Built collaboratively with Claude.
-Spec and plan documents live under `docs/superpowers/`.
