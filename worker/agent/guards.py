@@ -32,46 +32,46 @@ with workflow.unsafe.imports_passed_through():
 SLACK_TIMEOUT = timedelta(seconds=30)
 
 
-def _confirmation_title_and_description(tu: ClaudeToolUse) -> tuple[str, str]:
+def _confirmation_title_and_description(tool_use: ClaudeToolUse) -> tuple[str, str]:
     """Friendly title + description for the Block-Kit confirmation card.
     Encodes the agent's proposed action so the operator can see what they're
     approving."""
-    name = tu.name
-    args = tu.input
-    if name == "cancel_order":
+    tool_name = tool_use.name
+    tool_args = tool_use.input
+    if tool_name == "cancel_order":
         return (
-            f"Cancel order {args.get('order_id', '?')}?",
-            f"Reason: {args.get('reason', '(none)')}",
+            f"Cancel order {tool_args.get('order_id', '?')}?",
+            f"Reason: {tool_args.get('reason', '(none)')}",
         )
-    if name == "adjust_inventory":
+    if tool_name == "adjust_inventory":
         try:
-            delta = int(args.get("delta", 0))
+            delta = int(tool_args.get("delta", 0))
         except (TypeError, ValueError):
             delta = 0
         return (
-            f"Adjust inventory for {args.get('book_id', '?')} by {delta:+d}?",
-            f"Reason: {args.get('reason', '(none)')}",
+            f"Adjust inventory for {tool_args.get('book_id', '?')} by {delta:+d}?",
+            f"Reason: {tool_args.get('reason', '(none)')}",
         )
-    return (f"Run `{name}`?", f"Args: {args}")
+    return (f"Run `{tool_name}`?", f"Args: {tool_args}")
 
 
 @guard(kind=GuardKind.OPS_CONFIRMATION)
-async def ops_confirmation(tu: ClaudeToolUse, ctx: AgentCtx) -> GuardOutcome:
+async def ops_confirmation(tool_use: ClaudeToolUse, agent_ctx: AgentCtx) -> GuardOutcome:
     """Post a Slack confirmation card; await the operator's click.
     Pass -> proceed. Reject -> tool not run; reason fed back to Claude."""
-    assert ctx.channel and ctx.thread_ts, "ops_confirmation requires a Slack ctx"
-    title, description = _confirmation_title_and_description(tu)
+    assert agent_ctx.channel and agent_ctx.thread_ts, "ops_confirmation requires a Slack ctx"
+    title, description = _confirmation_title_and_description(tool_use)
 
     future: asyncio.Future[str] = asyncio.Future()
-    ctx.pending_actions[tu.id] = future
+    agent_ctx.pending_actions[tool_use.id] = future
     try:
         post_result = await workflow.execute_activity(
             post_confirmation_card,
             PostConfirmationCardInput(
-                channel=ctx.channel,
-                thread_ts=ctx.thread_ts,
+                channel=agent_ctx.channel,
+                thread_ts=agent_ctx.thread_ts,
                 workflow_id=workflow.info().workflow_id,
-                tool_use_id=tu.id,
+                tool_use_id=tool_use.id,
                 title=title,
                 description=description,
             ),
@@ -83,15 +83,15 @@ async def ops_confirmation(tu: ClaudeToolUse, ctx: AgentCtx) -> GuardOutcome:
             )
         decision = await future
     finally:
-        ctx.pending_actions.pop(tu.id, None)
+        agent_ctx.pending_actions.pop(tool_use.id, None)
 
     summary = "✅ Confirmed" if decision == "confirm" else "❌ Denied"
     await workflow.execute_activity(
         collapse_buttons,
         CollapseButtonsInput(
-            channel=ctx.channel,
+            channel=agent_ctx.channel,
             message_ts=post_result.message_ts,
-            summary_line=f"{summary} — {tu.name}",
+            summary_line=f"{summary} — {tool_use.name}",
         ),
         start_to_close_timeout=SLACK_TIMEOUT,
     )
@@ -100,7 +100,7 @@ async def ops_confirmation(tu: ClaudeToolUse, ctx: AgentCtx) -> GuardOutcome:
         return Pass()
     return Reject(
         reason=(
-            f"Operator declined to run {tu.name}. This is a final decision — "
+            f"Operator declined to run {tool_use.name}. This is a final decision — "
             "do not retry the same call. Acknowledge the operator's choice "
             "in your reply and proceed with any remaining tasks."
         ),
@@ -109,26 +109,26 @@ async def ops_confirmation(tu: ClaudeToolUse, ctx: AgentCtx) -> GuardOutcome:
 
 @guard(kind=GuardKind.CUSTOMER_CONFIRMATION)
 async def substitute_item_customer_confirmation(
-    tu: ClaudeToolUse, ctx: AgentCtx,
+    tool_use: ClaudeToolUse, agent_ctx: AgentCtx,
 ) -> GuardOutcome:
     """Spawn CustomerConfirmationWorkflow asking the customer to approve a
     proposed substitution. If approved, the substitute_item interaction runs
     next. If denied/timeout, the tool is rejected with a reason Claude can
     use to pick another substitute or escalate."""
-    args = SubstituteItemArgs(**tu.input)
-    repair_input: OrderRepairInput = ctx.domain_input
-    sub_book = get_book_by_id(args.substitute_item_id)
-    sub_title = sub_book.title if sub_book else args.substitute_item_id
+    args = SubstituteItemArgs(**tool_use.input)
+    repair_input: OrderRepairInput = agent_ctx.domain_input
+    substitute_book = get_book_by_id(args.substitute_item_id)
+    substitute_title = substitute_book.title if substitute_book else args.substitute_item_id
 
     customer_result = await workflow.execute_child_workflow(
         CustomerConfirmationWorkflow.run,
         CustomerConfirmationInput(
             order_id=repair_input.order_id,
             order_input=repair_input.order_input,
-            question=f"Substitute with '{sub_title}'?",
+            question=f"Substitute with '{substitute_title}'?",
             description=(
                 f"'{repair_input.order_input.book_title}' is out of stock. "
-                f"We can substitute with '{sub_title}'. Reason: {args.reason}"
+                f"We can substitute with '{substitute_title}'. Reason: {args.reason}"
             ),
             proposed_action=(
                 f"substitute {args.original_item_id} -> {args.substitute_item_id}"

@@ -31,14 +31,14 @@ def verify_token(token: str, secret: str, max_age_seconds: int) -> tuple[str, st
     Raises ValueError on any verification failure (bad signature, expired, malformed).
     """
     try:
-        raw = _signer(secret).unsign(token, max_age=max_age_seconds)
+        payload_bytes = _signer(secret).unsign(token, max_age=max_age_seconds)
     except SignatureExpired:
         raise ValueError("token expired")
     except BadSignature:
         raise ValueError("invalid token signature")
 
     try:
-        order_id, decision = raw.decode("utf-8").split("|", 1)
+        order_id, decision = payload_bytes.decode("utf-8").split("|", 1)
     except ValueError:
         raise ValueError("malformed token payload")
 

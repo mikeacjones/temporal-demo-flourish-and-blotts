@@ -66,10 +66,10 @@ def validate_tool(tool: ToolDef) -> None:
     required = CATEGORY_POLICIES.get(tool.category, frozenset())
     if not required:
         return
-    present = {getattr(g, "kind", None) for g in tool.guards}
+    present = {getattr(guard_fn, "kind", None) for guard_fn in tool.guards}
     if not (present & required):
         raise ToolPolicyError(
             f"Tool {tool.name!r} (category={tool.category.value}) needs "
-            f"at least one guard of kind {sorted(k.value for k in required)}; "
-            f"has {sorted(k.value for k in present if k)}"
+            f"at least one guard of kind {sorted(kind.value for kind in required)}; "
+            f"has {sorted(kind.value for kind in present if kind)}"
         )

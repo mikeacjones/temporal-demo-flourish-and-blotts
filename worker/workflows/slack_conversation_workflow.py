@@ -54,7 +54,14 @@ class SlackConversationWorkflow:
 
     @workflow.query
     def conversation_history(self) -> list[dict]:
-        return [{"role": t.role, "content": t.content, "timestamp": t.timestamp} for t in self._history]
+        return [
+            {
+                "role": turn.role,
+                "content": turn.content,
+                "timestamp": turn.timestamp,
+            }
+            for turn in self._history
+        ]
 
     @workflow.run
     async def run(self, input: SlackConversationInput) -> SlackConversationResult:

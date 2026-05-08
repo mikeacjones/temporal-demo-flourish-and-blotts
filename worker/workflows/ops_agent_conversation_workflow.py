@@ -33,7 +33,7 @@ class OpsAgentConversationWorkflow:
         self._closed = False
         self._messages: list[dict] = []
         self._history: list[dict] = []
-        self._ctx = AgentCtx()  # populated in run()
+        self._agent_ctx = AgentCtx()  # populated in run()
 
     @workflow.signal
     async def receive_slack_message(self, message: SlackMessageSignal) -> None:
@@ -45,7 +45,7 @@ class OpsAgentConversationWorkflow:
     async def receive_slack_action(self, action: OpsActionSignal) -> None:
         if self._closed:
             return
-        future = self._ctx.pending_actions.get(action.tool_use_id)
+        future = self._agent_ctx.pending_actions.get(action.tool_use_id)
         if future is not None and not future.done():
             future.set_result(action.value)
 
@@ -55,7 +55,7 @@ class OpsAgentConversationWorkflow:
 
     @workflow.run
     async def run(self, input: OpsAgentConversationInput) -> str:
-        self._ctx = AgentCtx(
+        self._agent_ctx = AgentCtx(
             channel=input.channel,
             thread_ts=input.thread_ts,
             domain_input=input,
@@ -80,17 +80,17 @@ class OpsAgentConversationWorkflow:
                 return "idle_timeout"
 
             while self._inbox:
-                msg = self._inbox.pop(0)
+                message = self._inbox.pop(0)
                 self._history.append({
-                    "role": "human", "content": msg.text, "timestamp": msg.timestamp,
+                    "role": "human", "content": message.text, "timestamp": message.timestamp,
                 })
-                self._messages.append({"role": "user", "content": msg.text})
+                self._messages.append({"role": "user", "content": message.text})
 
             turn = await run_agent_turn(
                 messages=self._messages,
                 system=system,
                 tools=OPS_TOOLS,
-                ctx=self._ctx,
+                agent_ctx=self._agent_ctx,
                 max_iterations=MAX_TOOL_TURNS_PER_MESSAGE,
             )
 

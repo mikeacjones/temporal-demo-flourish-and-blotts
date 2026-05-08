@@ -73,7 +73,7 @@ _READ_TIMEOUT = timedelta(seconds=10)
 def _repair_tool_call_input(tool_name: str):
     """Same factory as in repair_tools.py — build a ToolCallInput targeted
     at execute_repair_tool with the given tool name."""
-    def make(args, tu: ClaudeToolUse, ctx) -> ToolCallInput:
+    def make(args, tool_use: ClaudeToolUse, agent_ctx) -> ToolCallInput:
         return ToolCallInput(
             name=tool_name,
             args=args.model_dump(),
@@ -82,21 +82,25 @@ def _repair_tool_call_input(tool_name: str):
     return make
 
 
-def _cancel_order_make_input(args: CancelOrderArgs, tu: ClaudeToolUse, ctx) -> CancelOrderInput:
-    return CancelOrderInput(order_id=args.order_id, reason=args.reason, tool_use_id=tu.id)
+def _cancel_order_make_input(
+    args: CancelOrderArgs, tool_use: ClaudeToolUse, _agent_ctx,
+) -> CancelOrderInput:
+    return CancelOrderInput(order_id=args.order_id, reason=args.reason, tool_use_id=tool_use.id)
 
 
-def _adjust_inventory_make_input(args: AdjustInventoryArgs, tu: ClaudeToolUse, ctx) -> AdjustInventoryInput:
+def _adjust_inventory_make_input(
+    args: AdjustInventoryArgs, tool_use: ClaudeToolUse, _agent_ctx,
+) -> AdjustInventoryInput:
     return AdjustInventoryInput(
-        book_id=args.book_id, delta=args.delta, reason=args.reason, tool_use_id=tu.id,
+        book_id=args.book_id, delta=args.delta, reason=args.reason, tool_use_id=tool_use.id,
     )
 
 
-def _post_rich_reply_make_input(args: PostRichReplyArgs, tu: ClaudeToolUse, ctx):
+def _post_rich_reply_make_input(args: PostRichReplyArgs, tool_use: ClaudeToolUse, agent_ctx):
     from shared.models import PostRichThreadReplyInput
     return PostRichThreadReplyInput(
-        channel=ctx.channel,
-        thread_ts=ctx.thread_ts,
+        channel=agent_ctx.channel,
+        thread_ts=agent_ctx.thread_ts,
         blocks=args.blocks,
         fallback_text=args.fallback_text,
     )

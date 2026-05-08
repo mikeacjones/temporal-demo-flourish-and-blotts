@@ -47,16 +47,16 @@ async def release_inventory_reservation(input: CompensationInput) -> str:
     note = ""
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
-            resp = await http.post(
+            response = await http.post(
                 f"{API_BASE_URL}/api/inventory/release",
                 json={"order_id": input.order_id},
             )
-            resp.raise_for_status()
-            note = resp.json().get("note", "")
-    except Exception as e:
+            response.raise_for_status()
+            note = response.json().get("note", "")
+    except Exception as error:
         activity.logger.warning(
             "release_inventory_reservation: API release failed for order %s: %s",
-            input.order_id, e,
+            input.order_id, error,
         )
 
     activity.logger.info(

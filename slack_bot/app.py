@@ -43,14 +43,14 @@ async def _workflow_id_for_thread(channel_id: str, thread_ts: str) -> str | None
     query, no eventual-consistency race.
     """
     try:
-        resp = await app.client.conversations_replies(
+        response = await app.client.conversations_replies(
             channel=channel_id, ts=thread_ts, limit=1, include_all_metadata=True,
         )
-    except Exception as e:
-        log.error(f"conversations_replies failed for thread_ts={thread_ts}: {e}")
+    except Exception as error:
+        log.error(f"conversations_replies failed for thread_ts={thread_ts}: {error}")
         return None
 
-    messages = resp.get("messages", []) if resp else []
+    messages = response.get("messages", []) if response else []
     if not messages:
         return None
 
@@ -83,11 +83,11 @@ async def _get_bot_user_id() -> str | None:
     if _bot_user_id_cache is not None:
         return _bot_user_id_cache
     try:
-        resp = await app.client.auth_test()
-        _bot_user_id_cache = resp.get("user_id")
+        response = await app.client.auth_test()
+        _bot_user_id_cache = response.get("user_id")
         return _bot_user_id_cache
-    except Exception as e:
-        log.warning(f"auth_test failed: {e}")
+    except Exception as error:
+        log.warning(f"auth_test failed: {error}")
         return None
 
 
@@ -96,8 +96,8 @@ async def _resolve_user_name(user_id: str) -> str:
     try:
         info = await app.client.users_info(user=user_id)
         return info["user"].get("real_name") or info["user"].get("name") or user_id
-    except Exception as e:
-        log.warning(f"users_info failed for {user_id}: {e}")
+    except Exception as error:
+        log.warning(f"users_info failed for {user_id}: {error}")
         return user_id
 
 
@@ -152,8 +152,8 @@ async def handle_message(event, say):
             handle = client.get_workflow_handle(hitl_workflow_id)
             await handle.signal(SlackConversationWorkflow.receive_slack_message, signal)
             log.info(f"Forwarded message to HITL workflow {hitl_workflow_id}")
-        except Exception as e:
-            log.error(f"Failed to signal {hitl_workflow_id}: {e}")
+        except Exception as error:
+            log.error(f"Failed to signal {hitl_workflow_id}: {error}")
         return
 
     # 2) Ops-agent thread: signal at the deterministic workflow ID if it exists.
@@ -166,10 +166,10 @@ async def handle_message(event, say):
         handle = client.get_workflow_handle(ops_workflow_id)
         await handle.signal(OpsAgentConversationWorkflow.receive_slack_message, signal)
         log.info(f"Forwarded message to ops-agent workflow {ops_workflow_id}")
-    except Exception as e:
+    except Exception as error:
         # Most likely WorkflowNotFoundError — no ops-agent workflow at this ID.
         # That just means this thread isn't an ops-agent conversation; ignore.
-        log.info(f"No ops-agent workflow at {ops_workflow_id} ({e}); ignoring.")
+        log.info(f"No ops-agent workflow at {ops_workflow_id} ({error}); ignoring.")
 
 
 @app.event("app_mention")
@@ -201,14 +201,14 @@ async def handle_app_mention(event, say):
                 channel=channel, user=user_id,
                 text="This thread is busy with an order-repair approval. Mention me in a new thread.",
             )
-        except Exception as e:
-            log.warning(f"chat_postEphemeral failed: {e}")
+        except Exception as error:
+            log.warning(f"chat_postEphemeral failed: {error}")
         return
 
     workflow_id = f"ops-agent-{channel}-{thread_ts}"
     client = await get_temporal_client()
 
-    msg_signal = SlackMessageSignal(
+    message_signal = SlackMessageSignal(
         user_id=user_id, user_name=user_name, text=text, timestamp=event.get("ts", ""),
     )
 
@@ -227,11 +227,11 @@ async def handle_app_mention(event, say):
             id=workflow_id,
             task_queue=TASK_QUEUE,
             start_signal="receive_slack_message",
-            start_signal_args=[msg_signal],
+            start_signal_args=[message_signal],
         )
         log.info(f"Started or signalled ops-agent workflow {workflow_id}")
-    except Exception as e:
-        log.error(f"Failed to start/signal ops-agent workflow {workflow_id}: {e}")
+    except Exception as error:
+        log.error(f"Failed to start/signal ops-agent workflow {workflow_id}: {error}")
 
 
 async def _collapse_hitl_buttons(body: dict, signal: SlackActionSignal) -> None:
@@ -241,9 +241,9 @@ async def _collapse_hitl_buttons(body: dict, signal: SlackActionSignal) -> None:
     A failed chat_update is logged but never raises — the signal is the source of
     truth; the visual collapse is best-effort.
     """
-    msg = body.get("message", {})
+    message = body.get("message", {})
     channel = body.get("channel", {}).get("id") or body.get("container", {}).get("channel_id", "")
-    message_ts = msg.get("ts", "")
+    message_ts = message.get("ts", "")
     if channel and message_ts:
         try:
             await app.client.chat_update(
@@ -258,8 +258,8 @@ async def _collapse_hitl_buttons(body: dict, signal: SlackActionSignal) -> None:
                 }],
                 text=f"{signal.action_id.title()}d by {signal.user_name}",
             )
-        except Exception as e:
-            log.warning(f"chat_update (button collapse) failed: {e}")
+        except Exception as error:
+            log.warning(f"chat_update (button collapse) failed: {error}")
 
 
 @app.action("approve")
@@ -286,8 +286,8 @@ async def handle_approve(ack, body, action):
     try:
         await handle.signal(SlackConversationWorkflow.receive_slack_action, signal)
         log.info(f"Approved workflow {workflow_id} by {signal.user_name}")
-    except Exception as e:
-        log.error(f"Failed to approve workflow {workflow_id}: {e}")
+    except Exception as error:
+        log.error(f"Failed to approve workflow {workflow_id}: {error}")
 
     await _collapse_hitl_buttons(body, signal)
 
@@ -316,14 +316,14 @@ async def handle_deny(ack, body, action):
     try:
         await handle.signal(SlackConversationWorkflow.receive_slack_action, signal)
         log.info(f"Denied workflow {workflow_id} by {signal.user_name}")
-    except Exception as e:
-        log.error(f"Failed to deny workflow {workflow_id}: {e}")
+    except Exception as error:
+        log.error(f"Failed to deny workflow {workflow_id}: {error}")
 
     await _collapse_hitl_buttons(body, signal)
 
 
-def _parse_ops_value(raw: str) -> tuple[str, str, str] | None:
-    parts = raw.split("|")
+def _parse_ops_value(encoded_value: str) -> tuple[str, str, str] | None:
+    parts = encoded_value.split("|")
     if len(parts) != 3:
         return None
     return parts[0], parts[1], parts[2]
@@ -337,18 +337,18 @@ async def _post_ephemeral_stale(channel: str, user_id: str) -> None:
             channel=channel, user=user_id,
             text="This conversation has ended (idle timeout or already resolved). Mention me again to start fresh.",
         )
-    except Exception as e:
-        log.warning(f"chat_postEphemeral failed: {e}")
+    except Exception as error:
+        log.warning(f"chat_postEphemeral failed: {error}")
 
 
 async def _signal_or_warn_stale(handle, signal_method, signal_payload, channel: str, user_id: str, label: str) -> None:
     try:
         await handle.signal(signal_method, signal_payload)
-    except Exception as e:
+    except Exception as error:
         # Most likely WorkflowNotFoundError (workflow ended). The catch is broad on
         # purpose: even unexpected signal failures shouldn't leave the operator's
         # click silently swallowed.
-        log.warning(f"{label} signal failed: {e}")
+        log.warning(f"{label} signal failed: {error}")
         await _post_ephemeral_stale(channel, user_id)
 
 
@@ -360,7 +360,7 @@ async def _handle_ops_confirm_deny(ack, body, action, *, choice: str) -> None:
     parsed = _parse_ops_value(action.get("value") or "")
     if not parsed:
         return
-    workflow_id, tool_use_id, _discarded = parsed
+    workflow_id, tool_use_id, _action_value = parsed
     user = body.get("user", {}) or {}
     user_id = user.get("id", "unknown")
     channel = body.get("channel", {}).get("id", "") if isinstance(body.get("channel"), dict) else ""
@@ -402,8 +402,8 @@ async def handle_ops_picker_select(ack, body, action):
 
     # The workflow_id is reconstructed from the channel/thread the action came in on.
     channel = body.get("channel", {}).get("id", "")
-    msg = body.get("message", {})
-    thread_ts = msg.get("thread_ts") or msg.get("ts", "")
+    message = body.get("message", {})
+    thread_ts = message.get("thread_ts") or message.get("ts", "")
     workflow_id = f"ops-agent-{channel}-{thread_ts}"
 
     user = body.get("user", {})

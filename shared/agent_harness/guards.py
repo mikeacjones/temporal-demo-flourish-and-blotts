@@ -48,9 +48,9 @@ def guard(kind: GuardKind):
 
     Usage:
         @guard(kind=GuardKind.OPS_CONFIRMATION)
-        async def ops_confirmation(tu, ctx) -> GuardOutcome: ...
+        async def ops_confirmation(tool_use, agent_ctx) -> GuardOutcome: ...
     """
-    def decorator(fn: Guard) -> Guard:
-        fn.kind = kind  # type: ignore[attr-defined]
-        return fn
+    def decorator(guard_fn: Guard) -> Guard:
+        guard_fn.kind = kind  # type: ignore[attr-defined]
+        return guard_fn
     return decorator

@@ -95,7 +95,10 @@ class PlanValidationReport:
     def skip_summary(self) -> str:
         if not self.skipped:
             return ""
-        return "; ".join(f"#{i} ({s.tool or s.action!r}): {r}" for i, s, r in self.skipped)
+        return "; ".join(
+            f"#{step_index} ({step.tool or step.action!r}): {reason}"
+            for step_index, step, reason in self.skipped
+        )
 
 
 def validate_plan_steps(steps: list[RepairPlanStep]) -> PlanValidationReport:
@@ -113,24 +116,25 @@ def validate_plan_steps(steps: list[RepairPlanStep]) -> PlanValidationReport:
     executable: list[RepairPlanStep] = []
     skipped: list[tuple[int, RepairPlanStep, str]] = []
 
-    for i, step in enumerate(steps):
+    for step_index, step in enumerate(steps):
         if not step.tool:
-            skipped.append((i, step, "narrative-only step (no tool)"))
+            skipped.append((step_index, step, "narrative-only step (no tool)"))
             continue
 
         model = TOOL_ARG_MODELS.get(step.tool)
         if model is None:
-            skipped.append((i, step, f"tool {step.tool!r} not in executable allowlist"))
+            skipped.append((step_index, step, f"tool {step.tool!r} not in executable allowlist"))
             continue
 
         try:
             model.model_validate(step.tool_args or {})
-        except ValidationError as e:
+        except ValidationError as error:
             summary = "; ".join(
-                f"{'.'.join(str(loc) for loc in err['loc'])}: {err['msg']}"
-                for err in e.errors()
+                f"{'.'.join(str(location) for location in validation_error['loc'])}: "
+                f"{validation_error['msg']}"
+                for validation_error in error.errors()
             )
-            skipped.append((i, step, f"args failed validation — {summary}"))
+            skipped.append((step_index, step, f"args failed validation — {summary}"))
             continue
 
         executable.append(step)

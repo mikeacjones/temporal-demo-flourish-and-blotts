@@ -77,14 +77,14 @@ async def _get_client() -> Client:
     return _client
 
 
-def _first(sa: dict, key: str) -> str:
+def _first(search_attributes: dict, search_attribute_name: str) -> str:
     """Search-attribute values are lists in Temporal — pull the first scalar."""
-    val = sa.get(key)
-    if isinstance(val, list):
-        return str(val[0]) if val else ""
-    if val is None:
+    attribute_value = search_attributes.get(search_attribute_name)
+    if isinstance(attribute_value, list):
+        return str(attribute_value[0]) if attribute_value else ""
+    if attribute_value is None:
         return ""
-    return str(val)
+    return str(attribute_value)
 
 
 def _since_clause(since_hours: Optional[int]) -> str:
@@ -121,19 +121,19 @@ async def list_orders(input: ListOrdersInput) -> ListOrdersResult:
     # Fetch a generous page so dedupe doesn't starve the limit.
     fetch_cap = input.limit * 3 if input.status else input.limit
     by_order: dict[str, OrderSummary] = {}
-    async for ex in client.list_workflows(query=query, limit=fetch_cap):
-        sa = ex.search_attributes or {}
-        order_id = _first(sa, "OrderId")
+    async for workflow_execution in client.list_workflows(query=query, limit=fetch_cap):
+        search_attributes = workflow_execution.search_attributes or {}
+        order_id = _first(search_attributes, "OrderId")
         if not order_id:
             continue
         if order_id in by_order:
             continue  # already have a row for this order
         by_order[order_id] = OrderSummary(
             order_id=order_id,
-            workflow_id=ex.id,
-            workflow_type=ex.workflow_type,
-            status=str(ex.status),
-            order_status=_first(sa, "OrderStatus"),
+            workflow_id=workflow_execution.id,
+            workflow_type=workflow_execution.workflow_type,
+            status=str(workflow_execution.status),
+            order_status=_first(search_attributes, "OrderStatus"),
         )
         if len(by_order) >= input.limit:
             break
@@ -141,19 +141,19 @@ async def list_orders(input: ListOrdersInput) -> ListOrdersResult:
     return ListOrdersResult(orders=list(by_order.values()))
 
 
-def _flatten_sa(sa: dict) -> dict:
+def _flatten_sa(search_attributes: dict) -> dict:
     """Render Temporal search attributes as plain key→scalar/list of scalars.
     Useful when serializing for the agent."""
-    out = {}
-    for key, val in (sa or {}).items():
-        if isinstance(val, list):
-            if len(val) == 1:
-                out[key] = val[0]
+    flattened = {}
+    for search_attribute_name, attribute_value in (search_attributes or {}).items():
+        if isinstance(attribute_value, list):
+            if len(attribute_value) == 1:
+                flattened[search_attribute_name] = attribute_value[0]
             else:
-                out[key] = list(val)
+                flattened[search_attribute_name] = list(attribute_value)
         else:
-            out[key] = val
-    return out
+            flattened[search_attribute_name] = attribute_value
+    return flattened
 
 
 @activity.defn
@@ -170,29 +170,29 @@ async def describe_order(input: DescribeOrderInput) -> DescribeOrderResult:
     client = await _get_client()
     workflow_id = f"order-{input.order_id}"
     handle = client.get_workflow_handle(workflow_id)
-    desc = await handle.describe()
+    workflow_description = await handle.describe()
 
     # Find every other workflow tagged with this OrderId.
     related: list[RelatedWorkflowSummary] = []
-    async for ex in client.list_workflows(query=f"OrderId='{input.order_id}'"):
-        if ex.id == workflow_id:
+    async for workflow_execution in client.list_workflows(query=f"OrderId='{input.order_id}'"):
+        if workflow_execution.id == workflow_id:
             continue
         related.append(
             RelatedWorkflowSummary(
-                workflow_id=ex.id,
-                workflow_type=ex.workflow_type,
-                status=str(ex.status),
-                search_attributes=_flatten_sa(ex.search_attributes or {}),
+                workflow_id=workflow_execution.id,
+                workflow_type=workflow_execution.workflow_type,
+                status=str(workflow_execution.status),
+                search_attributes=_flatten_sa(workflow_execution.search_attributes or {}),
             )
         )
 
     return DescribeOrderResult(
         order_id=input.order_id,
         workflow_id=workflow_id,
-        status=str(desc.status),
-        start_time_iso=desc.start_time.isoformat() if desc.start_time else "",
-        close_time_iso=desc.close_time.isoformat() if desc.close_time else "",
-        search_attributes=_flatten_sa(desc.search_attributes or {}),
+        status=str(workflow_description.status),
+        start_time_iso=workflow_description.start_time.isoformat() if workflow_description.start_time else "",
+        close_time_iso=workflow_description.close_time.isoformat() if workflow_description.close_time else "",
+        search_attributes=_flatten_sa(workflow_description.search_attributes or {}),
         related_workflows=related,
     )
 
@@ -204,14 +204,14 @@ async def describe_workflow(input: DescribeWorkflowInput) -> DescribeWorkflowRes
     Distinct from describe_order which is order_id-keyed."""
     client = await _get_client()
     handle = client.get_workflow_handle(input.workflow_id)
-    desc = await handle.describe()
+    workflow_description = await handle.describe()
     return DescribeWorkflowResult(
         workflow_id=input.workflow_id,
-        workflow_type=desc.workflow_type,
-        status=str(desc.status),
-        start_time_iso=desc.start_time.isoformat() if desc.start_time else "",
-        close_time_iso=desc.close_time.isoformat() if desc.close_time else "",
-        search_attributes=_flatten_sa(desc.search_attributes or {}),
+        workflow_type=workflow_description.workflow_type,
+        status=str(workflow_description.status),
+        start_time_iso=workflow_description.start_time.isoformat() if workflow_description.start_time else "",
+        close_time_iso=workflow_description.close_time.isoformat() if workflow_description.close_time else "",
+        search_attributes=_flatten_sa(workflow_description.search_attributes or {}),
     )
 
 
@@ -226,31 +226,37 @@ def _summarize_event(event) -> "WorkflowHistoryEvent":
     summary = ""
     try:
         if event_type_name == "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED":
-            attrs = event.activity_task_scheduled_event_attributes
-            summary = f"activity={attrs.activity_type.name}"
+            event_attributes = event.activity_task_scheduled_event_attributes
+            summary = f"activity={event_attributes.activity_type.name}"
         elif event_type_name == "EVENT_TYPE_ACTIVITY_TASK_FAILED":
-            attrs = event.activity_task_failed_event_attributes
-            summary = f"failure={attrs.failure.message[:200]}"
+            event_attributes = event.activity_task_failed_event_attributes
+            summary = f"failure={event_attributes.failure.message[:200]}"
         elif event_type_name == "EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED":
-            attrs = event.workflow_execution_signaled_event_attributes
-            summary = f"signal={attrs.signal_name}"
+            event_attributes = event.workflow_execution_signaled_event_attributes
+            summary = f"signal={event_attributes.signal_name}"
         elif event_type_name == "EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED":
-            attrs = event.start_child_workflow_execution_initiated_event_attributes
-            summary = f"child_id={attrs.workflow_id} type={attrs.workflow_type.name}"
+            event_attributes = event.start_child_workflow_execution_initiated_event_attributes
+            summary = f"child_id={event_attributes.workflow_id} type={event_attributes.workflow_type.name}"
         elif event_type_name == "EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_COMPLETED":
-            attrs = event.child_workflow_execution_completed_event_attributes
-            summary = f"child_id={attrs.workflow_execution.workflow_id}"
+            event_attributes = event.child_workflow_execution_completed_event_attributes
+            summary = f"child_id={event_attributes.workflow_execution.workflow_id}"
         elif event_type_name == "EVENT_TYPE_WORKFLOW_EXECUTION_FAILED":
-            attrs = event.workflow_execution_failed_event_attributes
-            summary = f"failure={attrs.failure.message[:200]}"
+            event_attributes = event.workflow_execution_failed_event_attributes
+            summary = f"failure={event_attributes.failure.message[:200]}"
         elif event_type_name == "EVENT_TYPE_TIMER_STARTED":
-            attrs = event.timer_started_event_attributes
-            secs = attrs.start_to_fire_timeout.seconds if attrs.start_to_fire_timeout else 0
-            summary = f"timer_id={attrs.timer_id} duration_s={secs}"
+            event_attributes = event.timer_started_event_attributes
+            duration_seconds = (
+                event_attributes.start_to_fire_timeout.seconds
+                if event_attributes.start_to_fire_timeout
+                else 0
+            )
+            summary = f"timer_id={event_attributes.timer_id} duration_s={duration_seconds}"
         elif event_type_name == "EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES":
-            attrs = event.upsert_workflow_search_attributes_event_attributes
-            keys = list((attrs.search_attributes.indexed_fields or {}).keys())
-            summary = f"keys={keys}"
+            event_attributes = event.upsert_workflow_search_attributes_event_attributes
+            search_attribute_keys = list(
+                (event_attributes.search_attributes.indexed_fields or {}).keys()
+            )
+            summary = f"keys={search_attribute_keys}"
     except Exception:
         # If anything in the proto layout differs, fall back to type name only.
         pass
@@ -302,11 +308,14 @@ async def aggregate_repair_failures(input: AggregateFailuresInput) -> AggregateF
     query = "WorkflowType='OrderRepairWorkflow'" + _since_clause(input.since_hours)
 
     counter: Counter = Counter()
-    async for ex in client.list_workflows(query=query):
-        ft = _first((ex.search_attributes or {}), "FailureType") or "unknown"
-        counter[ft] += 1
+    async for workflow_execution in client.list_workflows(query=query):
+        failure_type = _first((workflow_execution.search_attributes or {}), "FailureType") or "unknown"
+        counter[failure_type] += 1
 
-    buckets = [FailureBucket(failure_type=k, count=v) for k, v in counter.most_common()]
+    buckets = [
+        FailureBucket(failure_type=failure_type, count=count)
+        for failure_type, count in counter.most_common()
+    ]
     return AggregateFailuresResult(buckets=buckets, total=sum(counter.values()))
 
 
@@ -315,43 +324,46 @@ async def _fetch_catalog_from_api() -> list[dict]:
     The worker's `shared.catalog.CATALOG` is stale once the API mutates state
     via reserve/release/adjust — so all reads go through HTTP."""
     async with httpx.AsyncClient(timeout=10.0) as http:
-        resp = await http.get(f"{API_BASE_URL}/api/catalog")
-        resp.raise_for_status()
-        return resp.json()
+        response = await http.get(f"{API_BASE_URL}/api/catalog")
+        response.raise_for_status()
+        return response.json()
 
 
 @activity.defn
 async def list_inventory() -> ListInventoryResult:
-    raw = await _fetch_catalog_from_api()
+    catalog_items = await _fetch_catalog_from_api()
     items = [
         InventoryItem(
-            book_id=b["id"],
-            title=b["title"],
-            author=b["author"],
-            in_stock=b["in_stock"],
-            physical_in_stock=b.get("physical_in_stock"),
-            category=b["category"],
+            book_id=book_data["id"],
+            title=book_data["title"],
+            author=book_data["author"],
+            in_stock=book_data["in_stock"],
+            physical_in_stock=book_data.get("physical_in_stock"),
+            category=book_data["category"],
         )
-        for b in raw
+        for book_data in catalog_items
     ]
     return ListInventoryResult(items=items)
 
 
 @activity.defn
 async def get_book(input: GetBookInput) -> GetBookResult:
-    raw = await _fetch_catalog_from_api()
-    match = next((b for b in raw if b["id"] == input.book_id), None)
-    if match is None:
+    catalog_items = await _fetch_catalog_from_api()
+    matching_book = next(
+        (book_data for book_data in catalog_items if book_data["id"] == input.book_id),
+        None,
+    )
+    if matching_book is None:
         return GetBookResult(found=False, item=None)
     return GetBookResult(
         found=True,
         item=InventoryItem(
-            book_id=match["id"],
-            title=match["title"],
-            author=match["author"],
-            in_stock=match["in_stock"],
-            physical_in_stock=match.get("physical_in_stock"),
-            category=match["category"],
+            book_id=matching_book["id"],
+            title=matching_book["title"],
+            author=matching_book["author"],
+            in_stock=matching_book["in_stock"],
+            physical_in_stock=matching_book.get("physical_in_stock"),
+            category=matching_book["category"],
         ),
     )
 
@@ -378,12 +390,12 @@ async def cancel_order(input: CancelOrderInput) -> CancelOrderResult:
     handle = client.get_workflow_handle(workflow_id)
     try:
         await handle.cancel()
-    except Exception as e:
+    except Exception as error:
         # Cancelling something that doesn't exist or is already closed: surface
         # to the agent as a non-retryable error so the executor wraps it as
         # is_error=True and the agent sees a clear message.
         raise ApplicationError(
-            f"cancel_order failed for '{input.order_id}': {e}",
+            f"cancel_order failed for '{input.order_id}': {error}",
             type="OrderCancelFailed",
             non_retryable=True,
         )
@@ -408,7 +420,7 @@ async def adjust_inventory(input: AdjustInventoryInput) -> AdjustInventoryResult
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
-            resp = await http.post(
+            response = await http.post(
                 f"{API_BASE_URL}/api/inventory/adjust",
                 json={
                     "book_id": input.book_id,
@@ -417,21 +429,21 @@ async def adjust_inventory(input: AdjustInventoryInput) -> AdjustInventoryResult
                     "idempotency_key": input.tool_use_id,
                 },
             )
-            if resp.status_code == 400:
-                detail = resp.json().get("detail", "unknown error")
+            if response.status_code == 400:
+                detail = response.json().get("detail", "unknown error")
                 raise ApplicationError(
                     f"adjust_inventory: {detail}",
                     type="UnknownBook",
                     non_retryable=True,
                 )
-            resp.raise_for_status()
-            data = resp.json()
+            response.raise_for_status()
+            data = response.json()
     except ApplicationError:
         raise
-    except Exception as e:
+    except Exception as error:
         # Transient / network error — let Temporal retry.
         raise ApplicationError(
-            f"adjust_inventory API call failed: {e}",
+            f"adjust_inventory API call failed: {error}",
             type="ApiError",
         )
 
@@ -493,15 +505,15 @@ async def post_confirmation_card(input: PostConfirmationCardInput) -> PostCardRe
     client = AsyncWebClient(token=SLACK_BOT_TOKEN)
     blocks = _confirmation_blocks(input)
     try:
-        resp = await client.chat_postMessage(
+        response = await client.chat_postMessage(
             channel=input.channel,
             thread_ts=input.thread_ts,
             blocks=blocks,
             text=input.title,
         )
-    except SlackApiError as e:
-        return PostCardResult(is_error=True, error_message=str(e))
-    return PostCardResult(message_ts=resp["ts"])
+    except SlackApiError as error:
+        return PostCardResult(is_error=True, error_message=str(error))
+    return PostCardResult(message_ts=response["ts"])
 
 
 def _picker_blocks(input: PostOrderPickerInput) -> list[dict]:
@@ -517,10 +529,10 @@ def _picker_blocks(input: PostOrderPickerInput) -> list[dict]:
                     "placeholder": {"type": "plain_text", "text": "Choose…"},
                     "options": [
                         {
-                            "text": {"type": "plain_text", "text": opt.label[:75]},
-                            "value": opt.value,
+                            "text": {"type": "plain_text", "text": option.label[:75]},
+                            "value": option.value,
                         }
-                        for opt in input.options
+                        for option in input.options
                     ],
                 }
             ],
@@ -533,15 +545,15 @@ async def post_order_picker(input: PostOrderPickerInput) -> PostCardResult:
     client = AsyncWebClient(token=SLACK_BOT_TOKEN)
     blocks = _picker_blocks(input)
     try:
-        resp = await client.chat_postMessage(
+        response = await client.chat_postMessage(
             channel=input.channel,
             thread_ts=input.thread_ts,
             blocks=blocks,
             text=input.prompt,
         )
-    except SlackApiError as e:
-        return PostCardResult(is_error=True, error_message=str(e))
-    return PostCardResult(message_ts=resp["ts"])
+    except SlackApiError as error:
+        return PostCardResult(is_error=True, error_message=str(error))
+    return PostCardResult(message_ts=response["ts"])
 
 
 @activity.defn
@@ -557,23 +569,23 @@ async def collapse_buttons(input: CollapseButtonsInput) -> None:
             blocks=blocks,
             text=input.summary_line,
         )
-    except SlackApiError as e:
+    except SlackApiError as error:
         # Best-effort: a failed update doesn't break correctness; log only.
-        activity.logger.warning("collapse_buttons failed: %s", e)
+        activity.logger.warning("collapse_buttons failed: %s", error)
 
 
 @activity.defn
 async def post_thread_reply(input: PostThreadReplyInput) -> PostThreadReplyResult:
     client = AsyncWebClient(token=SLACK_BOT_TOKEN)
     try:
-        resp = await client.chat_postMessage(
+        response = await client.chat_postMessage(
             channel=input.channel,
             thread_ts=input.thread_ts,
             text=input.text,
         )
-    except SlackApiError as e:
-        return PostThreadReplyResult(is_error=True, error_message=str(e))
-    return PostThreadReplyResult(message_ts=resp["ts"])
+    except SlackApiError as error:
+        return PostThreadReplyResult(is_error=True, error_message=str(error))
+    return PostThreadReplyResult(message_ts=response["ts"])
 
 
 @activity.defn
@@ -583,15 +595,15 @@ async def post_rich_thread_reply(input: PostRichThreadReplyInput) -> PostThreadR
     its next turn — same pattern as the rest of the Slack-targeting activities."""
     client = AsyncWebClient(token=SLACK_BOT_TOKEN)
     try:
-        resp = await client.chat_postMessage(
+        response = await client.chat_postMessage(
             channel=input.channel,
             thread_ts=input.thread_ts,
             blocks=input.blocks,
             text=input.fallback_text or "(rich reply)",
         )
-    except SlackApiError as e:
-        return PostThreadReplyResult(is_error=True, error_message=str(e))
-    return PostThreadReplyResult(message_ts=resp["ts"])
+    except SlackApiError as error:
+        return PostThreadReplyResult(is_error=True, error_message=str(error))
+    return PostThreadReplyResult(message_ts=response["ts"])
 
 
 @activity.defn
@@ -603,5 +615,5 @@ async def post_thread_closed_notice(input: PostThreadClosedNoticeInput) -> None:
             thread_ts=input.thread_ts,
             text="🌙 This conversation has gone idle for 24h. Mention me again to start fresh.",
         )
-    except SlackApiError as e:
-        activity.logger.warning("post_thread_closed_notice failed: %s", e)
+    except SlackApiError as error:
+        activity.logger.warning("post_thread_closed_notice failed: %s", error)

@@ -94,9 +94,9 @@ def _build_updated_order(
     """Materialise the post-substitution OrderInput for the parent workflow."""
     if state.staged_substitution is None:
         return None
-    _, sub_id, _ = state.staged_substitution
-    sub_book = get_book_by_id(sub_id)
-    if sub_book is None:
+    _original_item_id, substitute_item_id, _reason = state.staged_substitution
+    substitute_book = get_book_by_id(substitute_item_id)
+    if substitute_book is None:
         # Shouldn't happen — the interaction validates this — but degrade
         # gracefully rather than poisoning the parent.
         return None
@@ -104,8 +104,8 @@ def _build_updated_order(
         order_id=original.order_id,
         customer_name=original.customer_name,
         customer_email=original.customer_email,
-        book_id=sub_book.id,
-        book_title=sub_book.title,
+        book_id=substitute_book.id,
+        book_title=substitute_book.title,
         quantity=original.quantity,
         delivery_method=original.delivery_method,
         delivery_address=original.delivery_address,
@@ -114,13 +114,14 @@ def _build_updated_order(
 
 
 def _format_tools_executed(turn: TurnResult, state: RepairAgentState) -> list[str]:
-    out = [
-        f"{t.name}: {t.result_content}" + (" [error]" if t.is_error else "")
-        for t in turn.tools_executed
+    executed_tools = [
+        f"{executed_tool.name}: {executed_tool.result_content}"
+        + (" [error]" if executed_tool.is_error else "")
+        for executed_tool in turn.tools_executed
     ]
     if state.escalation_outcome is not None:
-        out.extend(state.escalation_outcome.plan_steps_executed)
-    return out
+        executed_tools.extend(state.escalation_outcome.plan_steps_executed)
+    return executed_tools
 
 
 def _shape_repair_result(
@@ -218,7 +219,7 @@ class OrderRepairWorkflow:
         })
 
         repair_state = RepairAgentState()
-        ctx = AgentCtx(domain_input=input, domain_state=repair_state)
+        agent_ctx = AgentCtx(domain_input=input, domain_state=repair_state)
         messages: list[dict] = [
             {"role": "user", "content": _initial_user_message(input)},
         ]
@@ -227,7 +228,7 @@ class OrderRepairWorkflow:
             messages=messages,
             system=_build_system_prompt(input),
             tools=REPAIR_TOOLS,
-            ctx=ctx,
+            agent_ctx=agent_ctx,
             max_iterations=MAX_AGENT_ITERATIONS,
         )
 

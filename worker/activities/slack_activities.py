@@ -22,7 +22,8 @@ def _format_plan_blocks(plan: RepairPlan | None) -> list[dict]:
         return [{"type": "section", "text": {"type": "mrkdwn", "text": "_No automated plan available. Human judgment required._"}}]
 
     steps_text = "\n".join(
-        f"*{i+1}.* {step.description}" for i, step in enumerate(plan.steps)
+        f"*{step_index + 1}.* {step.description}"
+        for step_index, step in enumerate(plan.steps)
     )
     urgency_emoji = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}.get(plan.urgency, "🟡")
 
@@ -198,7 +199,10 @@ async def process_conversation_message(input: ProcessMessageInput) -> ProcessMes
 
     current_plan_text = ""
     if input.current_plan:
-        steps = "\n".join(f"{i+1}. {s.description}" for i, s in enumerate(input.current_plan.steps))
+        steps = "\n".join(
+            f"{step_index + 1}. {step.description}"
+            for step_index, step in enumerate(input.current_plan.steps)
+        )
         current_plan_text = f"\n\nCurrent Plan:\n{steps}\n\nRationale: {input.current_plan.rationale}"
 
     system = f"""You are the AI assistant for Flourish & Blotts OMS managing a human approval conversation.
@@ -224,23 +228,30 @@ Your role:
     messages = [{"role": "user", "content": input.message.text}]
 
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY, max_retries=0)
-    raw = await client.messages.create(
+    raw_response = await client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4096,
         system=system,
         messages=messages,
         tools=CONVERSATION_TOOLS,
     )
-    serialized = _serialize_content(raw.content)
-    text = next((b["text"] for b in serialized if b["type"] == "text"), "")
-    tool_uses = [b for b in serialized if b["type"] == "tool_use"]
+    serialized = _serialize_content(raw_response.content)
+    text = next((block["text"] for block in serialized if block["type"] == "text"), "")
+    tool_use_blocks = [block for block in serialized if block["type"] == "tool_use"]
 
     from shared.models import ClaudeResponse, ClaudeToolUse
     response = ClaudeResponse(
-        stop_reason=raw.stop_reason,
+        stop_reason=raw_response.stop_reason,
         text=text,
         content=serialized,
-        tool_uses=[ClaudeToolUse(id=t["id"], name=t["name"], input=t["input"]) for t in tool_uses],
+        tool_uses=[
+            ClaudeToolUse(
+                id=tool_use_block["id"],
+                name=tool_use_block["name"],
+                input=tool_use_block["input"],
+            )
+            for tool_use_block in tool_use_blocks
+        ],
     )
 
     updated_plan = None
@@ -248,21 +259,21 @@ Your role:
 
     for tool_use in response.tool_uses:
         if tool_use.name == "update_plan":
-            inp = tool_use.input
+            tool_input = tool_use.input
             updated_plan = RepairPlan(
                 steps=[
                     RepairPlanStep(
-                        action=s.get("action", ""),
-                        description=s.get("description", ""),
-                        tool=s.get("tool"),
-                        tool_args=s.get("tool_args", {}),
+                        action=step_data.get("action", ""),
+                        description=step_data.get("description", ""),
+                        tool=step_data.get("tool"),
+                        tool_args=step_data.get("tool_args", {}),
                     )
-                    for s in inp.get("steps", [])
+                    for step_data in tool_input.get("steps", [])
                 ],
-                rationale=inp.get("rationale", ""),
+                rationale=tool_input.get("rationale", ""),
                 urgency=input.current_plan.urgency if input.current_plan else "medium",
             )
-            response_text = inp.get("response_to_human", response.text)
+            response_text = tool_input.get("response_to_human", response.text)
 
     if not response_text:
         response_text = "Understood. The plan remains as proposed. Use the buttons above to approve or deny."

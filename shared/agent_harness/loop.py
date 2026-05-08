@@ -52,80 +52,80 @@ class TurnResult:
 
 
 async def dispatch_tool(
-    tu: ClaudeToolUse, td: ToolDef, ctx: AgentCtx,
+    tool_use: ClaudeToolUse, tool_def: ToolDef, agent_ctx: AgentCtx,
 ) -> ToolResult:
     """Validate args, run guard chain, then run impl or interaction."""
     # 1. Pydantic-validate the args. ValidationError -> is_error=True.
     try:
-        args = td.args_model(**tu.input)
-    except ValidationError as e:
+        args = tool_def.args_model(**tool_use.input)
+    except ValidationError as error:
         return ToolResult(
-            tool_use_id=tu.id,
+            tool_use_id=tool_use.id,
             is_error=True,
-            content=f"Invalid args for {tu.name}: {e}",
+            content=f"Invalid args for {tool_use.name}: {error}",
         )
 
     # 2. Guard chain. Reject -> return; Pass -> continue.
-    for g in td.guards:
+    for guard_fn in tool_def.guards:
         try:
-            outcome = await g(tu, ctx)
-        except Exception as e:  # any exception in a guard becomes a Reject
-            outcome = Reject(reason=f"Guard error: {e}")
+            outcome = await guard_fn(tool_use, agent_ctx)
+        except Exception as error:  # any exception in a guard becomes a Reject
+            outcome = Reject(reason=f"Guard error: {error}")
         if isinstance(outcome, Reject):
-            return ToolResult(tool_use_id=tu.id, content=outcome.reason)
+            return ToolResult(tool_use_id=tool_use.id, content=outcome.reason)
 
     # 3. Run the impl (activity) or interaction (workflow coroutine).
-    if td.impl is not None:
+    if tool_def.impl is not None:
         try:
-            if td.make_impl_input is not None:
+            if tool_def.make_impl_input is not None:
                 # Custom adapter — pass whatever it returns as the activity's
                 # single positional arg. (Returning None is supported for
                 # activities that take no args.)
-                impl_input = td.make_impl_input(args, tu, ctx)
+                impl_input = tool_def.make_impl_input(args, tool_use, agent_ctx)
                 if impl_input is None:
                     result = await workflow.execute_activity(
-                        td.impl, start_to_close_timeout=td.timeout,
+                        tool_def.impl, start_to_close_timeout=tool_def.timeout,
                     )
                 else:
                     result = await workflow.execute_activity(
-                        td.impl, impl_input, start_to_close_timeout=td.timeout,
+                        tool_def.impl, impl_input, start_to_close_timeout=tool_def.timeout,
                     )
-            elif not td.args_model.model_fields:
+            elif not tool_def.args_model.model_fields:
                 # Parameterless args model (e.g. list_inventory's
                 # ListInventoryArgs) — call the activity with no positional
                 # arg. Activities defined as `async def f() -> ...` would
                 # otherwise raise TypeError.
                 result = await workflow.execute_activity(
-                    td.impl, start_to_close_timeout=td.timeout,
+                    tool_def.impl, start_to_close_timeout=tool_def.timeout,
                 )
             else:
                 # Default: pass the validated Pydantic args through.
                 result = await workflow.execute_activity(
-                    td.impl, args, start_to_close_timeout=td.timeout,
+                    tool_def.impl, args, start_to_close_timeout=tool_def.timeout,
                 )
-            return ToolResult(tool_use_id=tu.id, content=str(result))
-        except Exception as e:
+            return ToolResult(tool_use_id=tool_use.id, content=str(result))
+        except Exception as error:
             return ToolResult(
-                tool_use_id=tu.id,
+                tool_use_id=tool_use.id,
                 is_error=True,
-                content=f"Tool {tu.name!r} failed: {e}",
+                content=f"Tool {tool_use.name!r} failed: {error}",
             )
 
-    if td.interaction is not None:
+    if tool_def.interaction is not None:
         try:
-            return await td.interaction(tu, ctx)
-        except Exception as e:
+            return await tool_def.interaction(tool_use, agent_ctx)
+        except Exception as error:
             return ToolResult(
-                tool_use_id=tu.id,
+                tool_use_id=tool_use.id,
                 is_error=True,
-                content=f"Tool {tu.name!r} interaction failed: {e}",
+                content=f"Tool {tool_use.name!r} interaction failed: {error}",
             )
 
     # validate_tool prevents this in practice; defensive only.
     return ToolResult(
-        tool_use_id=tu.id,
+        tool_use_id=tool_use.id,
         is_error=True,
-        content=f"Tool {tu.name!r} has neither impl nor interaction",
+        content=f"Tool {tool_use.name!r} has neither impl nor interaction",
     )
 
 
@@ -134,7 +134,7 @@ async def run_agent_turn(
     messages: list[dict],          # mutated in place — workflow owns the list
     system: str,
     tools: list[ToolDef],
-    ctx: AgentCtx,
+    agent_ctx: AgentCtx,
     max_iterations: int = 10,
     claude_timeout: timedelta = timedelta(seconds=60),
     claude_retry: RetryPolicy = DEFAULT_CLAUDE_RETRY,
@@ -144,11 +144,11 @@ async def run_agent_turn(
     Each iteration: call Claude, append the assistant message, dispatch any
     tool_uses (in parallel via the existing executor), append tool results.
     """
-    by_name = {t.name: t for t in tools}
-    anthropic_tools = [t.to_anthropic_schema() for t in tools]
+    tools_by_name = {tool_def.name: tool_def for tool_def in tools}
+    anthropic_tools = [tool_def.to_anthropic_schema() for tool_def in tools]
     tools_executed: list[ExecutedTool] = []
 
-    for i in range(max_iterations):
+    for iteration_index in range(max_iterations):
         response: ClaudeResponse = await workflow.execute_activity(
             call_claude,
             CallClaudeInput(messages=messages, system=system, tools=anthropic_tools),
@@ -160,41 +160,41 @@ async def run_agent_turn(
         if response.stop_reason == "end_turn":
             return TurnResult(
                 stop_reason="end_turn",
-                iterations=i + 1,
+                iterations=iteration_index + 1,
                 tools_executed=tools_executed,
                 final_text=response.text,
             )
 
-        async def dispatch(tu: ClaudeToolUse, _pending) -> ToolResult:
-            return await dispatch_tool(tu, by_name[tu.name], ctx)
+        async def dispatch(tool_use: ClaudeToolUse, _pending_actions) -> ToolResult:
+            return await dispatch_tool(tool_use, tools_by_name[tool_use.name], agent_ctx)
 
         results = await execute_tool_uses(
             response.tool_uses,
-            pending_actions=ctx.pending_actions,
+            pending_actions=agent_ctx.pending_actions,
             activity_dispatch=dispatch,
         )
         messages.append(to_tool_results_message(results))
 
-        for tu, r in zip(response.tool_uses, results):
+        for tool_use, tool_result in zip(response.tool_uses, results):
             tools_executed.append(ExecutedTool(
-                name=tu.name,
-                args=tu.input,
-                result_content=r.content,
-                is_error=r.is_error,
+                name=tool_use.name,
+                args=tool_use.input,
+                result_content=tool_result.content,
+                is_error=tool_result.is_error,
             ))
 
         # Did any *successful* tool declare terminates_loop=True?
         terminator = next(
             (
-                tu for tu, r in zip(response.tool_uses, results)
-                if by_name[tu.name].terminates_loop and not r.is_error
+                tool_use for tool_use, tool_result in zip(response.tool_uses, results)
+                if tools_by_name[tool_use.name].terminates_loop and not tool_result.is_error
             ),
             None,
         )
         if terminator is not None:
             return TurnResult(
                 stop_reason="terminating_tool",
-                iterations=i + 1,
+                iterations=iteration_index + 1,
                 tools_executed=tools_executed,
                 final_text=response.text,
                 terminating_tool_use=terminator,

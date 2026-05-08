@@ -42,7 +42,7 @@ with workflow.unsafe.imports_passed_through():
 def _repair_tool_call_input(tool_name: str):
     """Factory: build a make_impl_input that wraps args into a ToolCallInput
     targeted at execute_repair_tool with the given tool name."""
-    def make(args, tu: ClaudeToolUse, ctx) -> ToolCallInput:
+    def make(args, tool_use: ClaudeToolUse, agent_ctx) -> ToolCallInput:
         return ToolCallInput(
             name=tool_name,
             args=args.model_dump(),

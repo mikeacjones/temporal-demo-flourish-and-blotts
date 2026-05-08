@@ -1,7 +1,7 @@
 """Repair-agent workflow-side state types.
 
 Owned by OrderRepairWorkflow. Interactions write to fields on RepairAgentState
-(via ctx.domain_state); the workflow's _shape_repair_result reads them after
+(via agent_ctx.domain_state); the workflow's _shape_repair_result reads them after
 run_agent_turn returns to build OrderRepairResult."""
 from __future__ import annotations
 

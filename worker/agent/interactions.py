@@ -62,15 +62,15 @@ READ_TOOL_TIMEOUT = timedelta(seconds=10)
 
 
 async def request_customer_confirmation_interaction(
-    tu: ClaudeToolUse, ctx: AgentCtx,
+    tool_use: ClaudeToolUse, agent_ctx: AgentCtx,
 ) -> ToolResult:
     """Spawn CustomerConfirmationWorkflow to ask the customer for credential
     attestation, scope-change acceptance, etc. The customer's answer IS the
     resolution — there is no follow-up tool. On denial/timeout we record it
-    on ctx.domain_state.customer_denial so the repair workflow can terminate
+    on agent_ctx.domain_state.customer_denial so the repair workflow can terminate
     as cancelled_by_customer."""
-    args = RequestCustomerConfirmationArgs(**tu.input)
-    repair_input: OrderRepairInput = ctx.domain_input
+    args = RequestCustomerConfirmationArgs(**tool_use.input)
+    repair_input: OrderRepairInput = agent_ctx.domain_input
 
     customer_result = await workflow.execute_child_workflow(
         CustomerConfirmationWorkflow.run,
@@ -91,7 +91,7 @@ async def request_customer_confirmation_interaction(
     )
 
     if customer_result.status in ("denied", "timeout"):
-        state: RepairAgentState = ctx.domain_state
+        state: RepairAgentState = agent_ctx.domain_state
         state.customer_denial = CustomerDenial(
             status=customer_result.status,
             note=(
@@ -103,7 +103,7 @@ async def request_customer_confirmation_interaction(
 
     note_suffix = f" Note: {customer_result.note}" if customer_result.note else ""
     return ToolResult(
-        tool_use_id=tu.id,
+        tool_use_id=tool_use.id,
         content=(
             f"Customer decision: {customer_result.status}"
             f" (via {customer_result.source or 'n/a'})." + note_suffix
@@ -112,13 +112,13 @@ async def request_customer_confirmation_interaction(
 
 
 async def post_order_picker_interaction(
-    tu: ClaudeToolUse, ctx: AgentCtx,
+    tool_use: ClaudeToolUse, agent_ctx: AgentCtx,
 ) -> ToolResult:
     """Post a Block-Kit dropdown of in-flight orders and return the
     operator's selection. The pending future is resolved by an
     OpsActionSignal carrying the selected order_id."""
-    assert ctx.channel and ctx.thread_ts, "post_order_picker requires Slack ctx"
-    args = PostOrderPickerArgs(**tu.input)
+    assert agent_ctx.channel and agent_ctx.thread_ts, "post_order_picker requires Slack ctx"
+    args = PostOrderPickerArgs(**tool_use.input)
 
     list_result = await workflow.execute_activity(
         list_orders,
@@ -127,25 +127,25 @@ async def post_order_picker_interaction(
     )
     if not list_result.orders:
         return ToolResult(
-            tool_use_id=tu.id,
+            tool_use_id=tool_use.id,
             content="No in-flight orders match the requested filter.",
             is_error=True,
         )
     options = [
-        PickerOption(value=o.order_id, label=f"{o.order_id} ({o.order_status})")
-        for o in list_result.orders[:25]
+        PickerOption(value=order.order_id, label=f"{order.order_id} ({order.order_status})")
+        for order in list_result.orders[:25]
     ]
 
     future: asyncio.Future[str] = asyncio.Future()
-    ctx.pending_actions[tu.id] = future
+    agent_ctx.pending_actions[tool_use.id] = future
     try:
         post_result = await workflow.execute_activity(
             post_order_picker,
             PostOrderPickerInput(
-                channel=ctx.channel,
-                thread_ts=ctx.thread_ts,
+                channel=agent_ctx.channel,
+                thread_ts=agent_ctx.thread_ts,
                 workflow_id=workflow.info().workflow_id,
-                tool_use_id=tu.id,
+                tool_use_id=tool_use.id,
                 prompt=args.prompt,
                 options=options,
             ),
@@ -153,48 +153,48 @@ async def post_order_picker_interaction(
         )
         if post_result.is_error:
             return ToolResult(
-                tool_use_id=tu.id,
+                tool_use_id=tool_use.id,
                 content=f"Could not post picker: {post_result.error_message}",
                 is_error=True,
             )
         selected = await future
     finally:
-        ctx.pending_actions.pop(tu.id, None)
+        agent_ctx.pending_actions.pop(tool_use.id, None)
 
     await workflow.execute_activity(
         collapse_buttons,
         CollapseButtonsInput(
-            channel=ctx.channel,
+            channel=agent_ctx.channel,
             message_ts=post_result.message_ts,
             summary_line=f"📌 Selected: {selected}",
         ),
         start_to_close_timeout=SLACK_TIMEOUT,
     )
-    return ToolResult(tool_use_id=tu.id, content=f"Operator selected order_id={selected}")
+    return ToolResult(tool_use_id=tool_use.id, content=f"Operator selected order_id={selected}")
 
 
 async def escalate_to_human_interaction(
-    tu: ClaudeToolUse, ctx: AgentCtx,
+    tool_use: ClaudeToolUse, agent_ctx: AgentCtx,
 ) -> ToolResult:
     """Hand off to a Flourish & Blotts ops operator via Slack. Spawns
     SlackConversationWorkflow for multi-turn negotiation; if approved, runs
     the validated plan steps before returning. ToolDef.terminates_loop=True
     means run_agent_turn ends the loop after this tool runs successfully —
     the repair workflow then shapes its terminal result from
-    ctx.domain_state.escalation_outcome."""
-    args = EscalateToHumanArgs(**tu.input)
-    repair_input: OrderRepairInput = ctx.domain_input
-    state: RepairAgentState = ctx.domain_state
+    agent_ctx.domain_state.escalation_outcome."""
+    args = EscalateToHumanArgs(**tool_use.input)
+    repair_input: OrderRepairInput = agent_ctx.domain_input
+    state: RepairAgentState = agent_ctx.domain_state
 
     proposed_plan = RepairPlan(
         steps=[
             RepairPlanStep(
-                action=s.action,
-                description=s.description,
-                tool=s.tool,
-                tool_args=s.tool_args,
+                action=proposed_step.action,
+                description=proposed_step.description,
+                tool=proposed_step.tool,
+                tool_args=proposed_step.tool_args,
             )
-            for s in args.proposed_plan
+            for proposed_step in args.proposed_plan
         ],
         rationale=args.rationale,
         urgency=args.urgency,
@@ -229,8 +229,8 @@ async def escalate_to_human_interaction(
             )
             plan_steps_executed.append(f"{step.action}: {step_result}")
         if report.skipped:
-            for _idx, sk, reason in report.skipped:
-                plan_steps_executed.append(f"(skipped) {sk.action}: {reason}")
+            for _step_index, skipped_step, reason in report.skipped:
+                plan_steps_executed.append(f"(skipped) {skipped_step.action}: {reason}")
             skip_note = (
                 f" Note: {len(report.skipped)} plan step(s) skipped "
                 f"(non-executable): {report.skip_summary}."
@@ -242,40 +242,40 @@ async def escalate_to_human_interaction(
         skip_note=skip_note,
     )
     return ToolResult(
-        tool_use_id=tu.id,
+        tool_use_id=tool_use.id,
         content=f"Escalation {slack_result.status}.{skip_note}",
     )
 
 
 async def substitute_item_repair_interaction(
-    tu: ClaudeToolUse, ctx: AgentCtx,
+    tool_use: ClaudeToolUse, agent_ctx: AgentCtx,
 ) -> ToolResult:
     """In-repair substitute_item: validates the substitute against the
     catalog and stages it on workflow state. Pure workflow-side work; no
     activity. The parent OrderWorkflow re-runs subsequent fulfilment steps
     against the substituted book once the repair workflow returns its
     OrderRepairResult.updated_order."""
-    args = SubstituteItemArgs(**tu.input)
-    repair_input: OrderRepairInput = ctx.domain_input
-    state: RepairAgentState = ctx.domain_state
+    args = SubstituteItemArgs(**tool_use.input)
+    repair_input: OrderRepairInput = agent_ctx.domain_input
+    state: RepairAgentState = agent_ctx.domain_state
 
-    sub_book = get_book_by_id(args.substitute_item_id)
-    if sub_book is None:
+    substitute_book = get_book_by_id(args.substitute_item_id)
+    if substitute_book is None:
         return ToolResult(
-            tool_use_id=tu.id,
+            tool_use_id=tool_use.id,
             is_error=True,
             content=(
                 f"ERROR: substitute item_id {args.substitute_item_id!r} not found "
                 "in the catalog. Pick a valid book id."
             ),
         )
-    if sub_book.physical_count < repair_input.order_input.quantity:
+    if substitute_book.physical_count < repair_input.order_input.quantity:
         return ToolResult(
-            tool_use_id=tu.id,
+            tool_use_id=tool_use.id,
             is_error=True,
             content=(
-                f"ERROR: substitute '{sub_book.title}' has only "
-                f"{sub_book.physical_count} physically on the shelf "
+                f"ERROR: substitute '{substitute_book.title}' has only "
+                f"{substitute_book.physical_count} physically on the shelf "
                 f"(need {repair_input.order_input.quantity}). Pick another."
             ),
         )
@@ -286,11 +286,11 @@ async def substitute_item_repair_interaction(
         args.reason,
     )
     return ToolResult(
-        tool_use_id=tu.id,
+        tool_use_id=tool_use.id,
         content=(
             f"Order {repair_input.order_id}: substitution committed — "
             f"'{args.original_item_id}' → '{args.substitute_item_id}' "
-            f"('{sub_book.title}'). Reason: {args.reason}. The order will be "
+            f"('{substitute_book.title}'). Reason: {args.reason}. The order will be "
             "repackaged with the substituted book and dispatched normally."
         ),
     )

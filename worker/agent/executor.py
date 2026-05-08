@@ -36,17 +36,17 @@ async def execute_tool_uses(
     next round-trip and is expected to self-correct.
     """
 
-    async def run_one(tu: ClaudeToolUse) -> ToolResult:
+    async def run_one(tool_use: ClaudeToolUse) -> ToolResult:
         try:
-            return await activity_dispatch(tu, pending_actions)
-        except Exception as e:
+            return await activity_dispatch(tool_use, pending_actions)
+        except Exception as error:
             return ToolResult(
-                tool_use_id=tu.id,
-                content=f"Tool '{tu.name}' failed: {e}",
+                tool_use_id=tool_use.id,
+                content=f"Tool '{tool_use.name}' failed: {error}",
                 is_error=True,
             )
 
-    return await asyncio.gather(*(run_one(tu) for tu in tool_uses))
+    return await asyncio.gather(*(run_one(tool_use) for tool_use in tool_uses))
 
 
 def to_tool_results_message(results: list[ToolResult]) -> dict:
@@ -56,10 +56,10 @@ def to_tool_results_message(results: list[ToolResult]) -> dict:
         "content": [
             {
                 "type": "tool_result",
-                "tool_use_id": r.tool_use_id,
-                "content": r.content,
-                "is_error": r.is_error,
+                "tool_use_id": tool_result.tool_use_id,
+                "content": tool_result.content,
+                "is_error": tool_result.is_error,
             }
-            for r in results
+            for tool_result in results
         ],
     }

@@ -43,7 +43,7 @@ class ToolDef:
     # terminates the loop after this tool runs successfully.
     terminates_loop: bool = False
     # Optional builder that produces the activity's input from
-    # (validated args, tool_use, ctx). Default is identity. Use this when the
+    # (validated args, tool_use, agent_ctx). Default is identity. Use this when the
     # activity needs harness metadata Claude doesn't supply (tool_use_id) or
     # when the activity's input shape differs from the tool's args (e.g. a
     # ToolCallInput wrapping name + args + order_id for execute_repair_tool).

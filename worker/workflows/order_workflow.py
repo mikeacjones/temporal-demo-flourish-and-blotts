@@ -107,10 +107,10 @@ class OrderWorkflow:
                     start_to_close_timeout=COMPENSATION_TIMEOUT,
                 )
                 self._compensations_executed.append(f"{compensation_name}: {result}")
-            except ActivityError as e:
+            except ActivityError as error:
                 # Deliberately let permanent compensation failure surface as workflow
                 # failure — operators need to see "refund stuck" loudly, not silently.
-                self._compensations_executed.append(f"{compensation_name}: FAILED — {e}")
+                self._compensations_executed.append(f"{compensation_name}: FAILED — {error}")
                 raise
 
         self._pending_compensations.clear()
@@ -156,8 +156,8 @@ class OrderWorkflow:
                             (activity_name, COMPENSATIONS[activity_name])
                         )
 
-                except ActivityError as e:
-                    cause = e.cause
+                except ActivityError as error:
+                    cause = error.cause
                     if isinstance(cause, ApplicationError) and cause.type == "OrderFailure":
                         # Activity passes structured data as the first "detail" of the
                         # ApplicationError; cause.args[0] is the human-readable message.

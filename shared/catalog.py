@@ -116,4 +116,4 @@ CATALOG: list[BookItem] = [
 
 
 def get_book_by_id(book_id: str) -> Optional[BookItem]:
-    return next((b for b in CATALOG if b.id == book_id), None)
+    return next((book for book in CATALOG if book.id == book_id), None)

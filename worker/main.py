@@ -75,9 +75,9 @@ async def register_search_attributes(client: Client) -> None:
             )
         )
         log.info("Custom search attributes registered")
-    except Exception as e:
+    except Exception as error:
         # Usually means they already exist — safe to ignore
-        log.info(f"Search attribute registration (may already exist): {e}")
+        log.info(f"Search attribute registration (may already exist): {error}")
 
 
 async def main() -> None:

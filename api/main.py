@@ -37,7 +37,7 @@ HITL_TOKEN_MAX_AGE_SECONDS = 24 * 60 * 60
 app = FastAPI(title="Flourish & Blotts OMS API")
 
 
-def _decode_sa(wf, key: str, default: Any = None) -> Any:
+def _decode_sa(workflow_execution, search_attribute_name: str, default: Any = None) -> Any:
     """Read a search-attribute value from a Temporal workflow execution.
 
     As of temporalio 1.26 both `list_workflows()` yields and `describe()` results
@@ -45,8 +45,8 @@ def _decode_sa(wf, key: str, default: Any = None) -> Any:
     for Keyword, Int, Bool, etc. This peels the list to return a scalar.
     """
     try:
-        sa = getattr(wf, 'search_attributes', None) or {}
-        value = sa.get(key)
+        search_attributes = getattr(workflow_execution, 'search_attributes', None) or {}
+        value = search_attributes.get(search_attribute_name)
         if value is None:
             return default
         if isinstance(value, list):
@@ -56,22 +56,34 @@ def _decode_sa(wf, key: str, default: Any = None) -> Any:
         return default
 
 
-def _wf_to_order(wf) -> dict:
-    workflow_id = wf.id
+def _wf_to_order(workflow_execution) -> dict:
+    workflow_id = workflow_execution.id
     order_id = workflow_id.removeprefix("order-")
     return {
         "workflow_id": workflow_id,
         "order_id": order_id,
-        "customer_name": _decode_sa(wf, "CustomerName", "Unknown"),
-        "book_title": _decode_sa(wf, "BookTitle", "Unknown"),
-        "order_status": _decode_sa(wf, "OrderStatus", "processing"),
-        "failure_type": _decode_sa(wf, "FailureType", "none"),
-        "repair_outcome": _decode_sa(wf, "RepairOutcome"),
-        "requires_hitl": _decode_sa(wf, "RequiresHITL", False),
-        "repair_attempts": _decode_sa(wf, "RepairAttempts", 0),
-        "started_at": wf.start_time.isoformat() if wf.start_time else None,
-        "close_time": wf.close_time.isoformat() if wf.close_time else None,
-        "execution_status": wf.status.name if wf.status else "RUNNING",
+        "customer_name": _decode_sa(workflow_execution, "CustomerName", "Unknown"),
+        "book_title": _decode_sa(workflow_execution, "BookTitle", "Unknown"),
+        "order_status": _decode_sa(workflow_execution, "OrderStatus", "processing"),
+        "failure_type": _decode_sa(workflow_execution, "FailureType", "none"),
+        "repair_outcome": _decode_sa(workflow_execution, "RepairOutcome"),
+        "requires_hitl": _decode_sa(workflow_execution, "RequiresHITL", False),
+        "repair_attempts": _decode_sa(workflow_execution, "RepairAttempts", 0),
+        "started_at": (
+            workflow_execution.start_time.isoformat()
+            if workflow_execution.start_time
+            else None
+        ),
+        "close_time": (
+            workflow_execution.close_time.isoformat()
+            if workflow_execution.close_time
+            else None
+        ),
+        "execution_status": (
+            workflow_execution.status.name
+            if workflow_execution.status
+            else "RUNNING"
+        ),
         "temporal_url": f"{TEMPORAL_UI_URL}/namespaces/default/workflows/{workflow_id}",
     }
 
@@ -179,8 +191,8 @@ BULK_DISTRIBUTION = [
     ("qta-001",    "gringotts_failure",             2),
 ]
 
-_weights = [w for _, _, w in BULK_DISTRIBUTION]
-_choices = [(b, f) for b, f, _ in BULK_DISTRIBUTION]
+_weights = [weight for _, _, weight in BULK_DISTRIBUTION]
+_choices = [(book_id, forced_failure) for book_id, forced_failure, _ in BULK_DISTRIBUTION]
 
 DELIVERY_METHODS = ["owl_post", "floo_network", "portkey_express"]
 DELIVERY_WEIGHTS = [0.5, 0.35, 0.15]
@@ -188,11 +200,11 @@ DELIVERY_WEIGHTS = [0.5, 0.35, 0.15]
 
 def _pick_weighted(population, weights):
     total = sum(weights)
-    r = random.uniform(0, total)
-    cum = 0
-    for item, w in zip(population, weights):
-        cum += w
-        if r <= cum:
+    threshold = random.uniform(0, total)
+    cumulative_weight = 0
+    for item, weight in zip(population, weights):
+        cumulative_weight += weight
+        if threshold <= cumulative_weight:
             return item
     return population[-1]
 
@@ -214,18 +226,18 @@ async def startup():
 async def get_catalog():
     return [
         {
-            "id": b.id,
-            "title": b.title,
-            "author": b.author,
-            "price_galleons": b.price_galleons,
-            "description": b.description,
-            "category": b.category,
-            "in_stock": b.in_stock,
-            "physical_in_stock": b.physical_in_stock,
-            "requires_ministry_approval": b.requires_ministry_approval,
-            "cover_color": b.cover_color,
+            "id": book.id,
+            "title": book.title,
+            "author": book.author,
+            "price_galleons": book.price_galleons,
+            "description": book.description,
+            "category": book.category,
+            "in_stock": book.in_stock,
+            "physical_in_stock": book.physical_in_stock,
+            "requires_ministry_approval": book.requires_ministry_approval,
+            "cover_color": book.cover_color,
         }
-        for b in CATALOG
+        for book in CATALOG
     ]
 
 
@@ -271,26 +283,30 @@ def _release_stock(order_id: str) -> tuple[bool, str]:
     """Increment in_stock by the prior reservation's quantity. Idempotent on
     order_id — calling release twice (or on an order with no active reservation)
     is a silent no-op rather than an error."""
-    pair = _active_reservations.pop(order_id, None)
-    if pair is None:
+    reservation = _active_reservations.pop(order_id, None)
+    if reservation is None:
         return False, "no active reservation for this order_id"
-    book_id, quantity = pair
+    book_id, quantity = reservation
     book = get_book_by_id(book_id)
     if book is not None:
         book.in_stock += quantity
     return True, ""
 
 
-def _adjust_stock(book_id: str, delta: int, key: str) -> tuple[bool, str, int]:
-    """Apply delta to in_stock. Idempotent on key — second call returns the
+def _adjust_stock(book_id: str, delta: int, idempotency_key: str) -> tuple[bool, str, int]:
+    """Apply delta to in_stock. Idempotent on idempotency_key — second call returns the
     cached prior count without re-applying. Returns (ok, message, new_count)."""
-    if key in _applied_adjust_keys:
-        return True, "(already applied — idempotent replay)", _applied_adjust_keys[key]
+    if idempotency_key in _applied_adjust_keys:
+        return (
+            True,
+            "(already applied — idempotent replay)",
+            _applied_adjust_keys[idempotency_key],
+        )
     book = get_book_by_id(book_id)
     if book is None:
         return False, f"book '{book_id}' not found", 0
     book.in_stock = max(0, book.in_stock + delta)
-    _applied_adjust_keys[key] = book.in_stock
+    _applied_adjust_keys[idempotency_key] = book.in_stock
     return True, "", book.in_stock
 
 
@@ -301,12 +317,14 @@ class ReserveInventoryRequest(BaseModel):
 
 
 @app.post("/api/inventory/reserve")
-async def reserve_inventory(req: ReserveInventoryRequest):
-    ok, msg = _reserve_stock(req.book_id, req.quantity, req.order_id)
-    if not ok:
-        raise HTTPException(status_code=409, detail=msg)
-    book = get_book_by_id(req.book_id)
-    return {"book_id": req.book_id, "in_stock": book.in_stock if book else 0}
+async def reserve_inventory(request: ReserveInventoryRequest):
+    reserved, error_message = _reserve_stock(
+        request.book_id, request.quantity, request.order_id,
+    )
+    if not reserved:
+        raise HTTPException(status_code=409, detail=error_message)
+    book = get_book_by_id(request.book_id)
+    return {"book_id": request.book_id, "in_stock": book.in_stock if book else 0}
 
 
 class ReleaseInventoryRequest(BaseModel):
@@ -314,9 +332,9 @@ class ReleaseInventoryRequest(BaseModel):
 
 
 @app.post("/api/inventory/release")
-async def release_inventory(req: ReleaseInventoryRequest):
-    ok, msg = _release_stock(req.order_id)
-    return {"released": ok, "note": msg}
+async def release_inventory(request: ReleaseInventoryRequest):
+    released, note = _release_stock(request.order_id)
+    return {"released": released, "note": note}
 
 
 class AdjustInventoryRequest(BaseModel):
@@ -327,11 +345,13 @@ class AdjustInventoryRequest(BaseModel):
 
 
 @app.post("/api/inventory/adjust")
-async def adjust_inventory_endpoint(req: AdjustInventoryRequest):
-    ok, msg, new_count = _adjust_stock(req.book_id, req.delta, req.idempotency_key)
-    if not ok:
-        raise HTTPException(status_code=400, detail=msg)
-    return {"book_id": req.book_id, "in_stock": new_count, "note": msg}
+async def adjust_inventory_endpoint(request: AdjustInventoryRequest):
+    adjusted, message, new_count = _adjust_stock(
+        request.book_id, request.delta, request.idempotency_key,
+    )
+    if not adjusted:
+        raise HTTPException(status_code=400, detail=message)
+    return {"book_id": request.book_id, "in_stock": new_count, "note": message}
 
 
 # ---------------------------------------------------------------------------
@@ -339,8 +359,8 @@ async def adjust_inventory_endpoint(req: AdjustInventoryRequest):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/orders")
-async def place_order(req: PlaceOrderRequest):
-    book = get_book_by_id(req.book_id)
+async def place_order(request: PlaceOrderRequest):
+    book = get_book_by_id(request.book_id)
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
 
@@ -349,20 +369,23 @@ async def place_order(req: PlaceOrderRequest):
     # Reserve stock before starting the workflow. The workflow's saga
     # compensation will call /api/inventory/release if the order ends up
     # cancelled (via release_inventory_reservation activity → API).
-    ok, msg = _reserve_stock(req.book_id, req.quantity, order_id)
-    if not ok:
-        raise HTTPException(status_code=409, detail=f"Cannot place order: {msg}")
+    reserved, error_message = _reserve_stock(request.book_id, request.quantity, order_id)
+    if not reserved:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot place order: {error_message}",
+        )
 
     order = OrderInput(
         order_id=order_id,
-        customer_name=req.customer_name,
-        customer_email=req.customer_email,
-        book_id=req.book_id,
+        customer_name=request.customer_name,
+        customer_email=request.customer_email,
+        book_id=request.book_id,
         book_title=book.title,
-        quantity=req.quantity,
-        delivery_method=req.delivery_method,
-        delivery_address=req.delivery_address,
-        forced_failure=req.forced_failure,
+        quantity=request.quantity,
+        delivery_method=request.delivery_method,
+        delivery_address=request.delivery_address,
+        forced_failure=request.forced_failure,
     )
 
     try:
@@ -374,11 +397,14 @@ async def place_order(req: PlaceOrderRequest):
             task_queue=TASK_QUEUE,
             execution_timeout=timedelta(hours=26),
         )
-    except Exception as e:
+    except Exception as error:
         # Workflow start failed — release the reservation we just made so
         # stock isn't permanently lost.
         _release_stock(order_id)
-        raise HTTPException(status_code=500, detail=f"Failed to start order workflow: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to start order workflow: {error}",
+        )
 
     return {
         "order_id": order_id,
@@ -388,14 +414,14 @@ async def place_order(req: PlaceOrderRequest):
 
 
 @app.post("/api/orders/bulk")
-async def bulk_orders(req: BulkOrderRequest):
-    if req.count < 1 or req.count > 500:
+async def bulk_orders(request: BulkOrderRequest):
+    if request.count < 1 or request.count > 500:
         raise HTTPException(status_code=400, detail="count must be 1–500")
 
     client = await get_client()
     started = []
 
-    for _ in range(req.count):
+    for _order_index in range(request.count):
         book_id, forced_failure = _pick_weighted(_choices, _weights)
         book = get_book_by_id(book_id)
         customer_name, customer_email = random.choice(HP_CUSTOMERS)
@@ -413,8 +439,8 @@ async def bulk_orders(req: BulkOrderRequest):
         # Reserve stock before starting; skip this order if insufficient stock.
         # Bulk orders are best-effort — one out-of-stock entry shouldn't fail
         # the whole batch.
-        ok, _msg = _reserve_stock(book_id, 1, order_id)
-        if not ok:
+        reserved, _error_message = _reserve_stock(book_id, 1, order_id)
+        if not reserved:
             continue
 
         order = OrderInput(
@@ -468,8 +494,8 @@ async def list_orders(
     query = " AND ".join(query_parts)
 
     orders = []
-    async for wf in client.list_workflows(query=query):
-        orders.append(_wf_to_order(wf))
+    async for workflow_execution in client.list_workflows(query=query):
+        orders.append(_wf_to_order(workflow_execution))
         if len(orders) >= limit:
             break
 
@@ -482,21 +508,21 @@ async def get_order(order_id: str):
     client = await get_client()
     workflow_id = f"order-{order_id}"
     try:
-        wf = await client.get_workflow_handle(workflow_id).describe()
+        workflow_execution = await client.get_workflow_handle(workflow_id).describe()
     except Exception:
         raise HTTPException(status_code=404, detail="Order not found")
-    return _wf_to_order(wf)
+    return _wf_to_order(workflow_execution)
 
 
 @app.get("/api/stats")
 async def get_stats():
     client = await get_client()
 
-    async def count_query(q: str) -> int:
-        n = 0
-        async for _ in client.list_workflows(query=q):
-            n += 1
-        return n
+    async def count_query(query: str) -> int:
+        workflow_count = 0
+        async for _workflow_execution in client.list_workflows(query=query):
+            workflow_count += 1
+        return workflow_count
 
     total, completed, awaiting_hitl, auto_repaired, hitl_approved, hitl_denied, cancelled = await asyncio.gather(
         count_query('WorkflowType = "OrderWorkflow"'),
@@ -521,7 +547,7 @@ async def get_stats():
 
 
 @app.post("/api/orders/{order_id}/approve")
-async def approve_order(order_id: str, req: ApproveOrderRequest):
+async def approve_order(order_id: str, request: ApproveOrderRequest):
     """Direct approve — fallback when Slack is not configured."""
     client = await get_client()
     import datetime
@@ -532,17 +558,17 @@ async def approve_order(order_id: str, req: ApproveOrderRequest):
             SlackActionSignal(
                 action_id="approve",
                 user_id="ops-dashboard",
-                user_name=req.user_name,
+                user_name=request.user_name,
                 timestamp=str(datetime.datetime.utcnow().timestamp()),
             ),
         )
         return {"status": "approved"}
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as error:
+        raise HTTPException(status_code=404, detail=str(error))
 
 
 @app.post("/api/orders/{order_id}/deny")
-async def deny_order(order_id: str, req: ApproveOrderRequest):
+async def deny_order(order_id: str, request: ApproveOrderRequest):
     """Direct deny — fallback when Slack is not configured."""
     client = await get_client()
     import datetime
@@ -553,13 +579,13 @@ async def deny_order(order_id: str, req: ApproveOrderRequest):
             SlackActionSignal(
                 action_id="deny",
                 user_id="ops-dashboard",
-                user_name=req.user_name,
+                user_name=request.user_name,
                 timestamp=str(datetime.datetime.utcnow().timestamp()),
             ),
         )
         return {"status": "denied"}
-    except Exception as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as error:
+        raise HTTPException(status_code=404, detail=str(error))
 
 
 # ---------------------------------------------------------------------------
@@ -603,10 +629,10 @@ async def _deliver_customer_decision(order_id: str, decision: str, source: str) 
     try:
         await handle.signal("receive_customer_decision", signal_value)
         return "delivered"
-    except Exception as e:
+    except Exception as error:
         # Most common case: the workflow has already closed (another click won or it timed out).
         # The outer handler converts this into a friendly "already handled" HTML page.
-        raise HTTPException(status_code=404, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(error))
 
 
 @app.get("/hitl/{order_id}/decision", response_class=HTMLResponse)
@@ -619,12 +645,12 @@ async def customer_hitl_landing(order_id: str, result: str, token: str):
         token_order_id, token_decision = verify_token(
             token, HITL_TOKEN_SECRET, HITL_TOKEN_MAX_AGE_SECONDS,
         )
-    except ValueError as e:
+    except ValueError as error:
         return HTMLResponse(
             _decision_html(
                 title="Link invalid",
                 heading="Link invalid or expired",
-                message=f"We couldn't verify that link ({e}). If you still need to respond, "
+                message=f"We couldn't verify that link ({error}). If you still need to respond, "
                         "please use the prompt on your order status page.",
                 color="#8b0000",
             ),
@@ -674,12 +700,12 @@ class CustomerDecisionRequest(BaseModel):
 
 
 @app.post("/api/orders/{order_id}/customer-decision")
-async def order_page_customer_decision(order_id: str, req: CustomerDecisionRequest):
+async def order_page_customer_decision(order_id: str, request: CustomerDecisionRequest):
     """Decision posted from the /orders/:id page's Pending Decision card."""
-    if req.decision not in ("approve", "deny"):
+    if request.decision not in ("approve", "deny"):
         raise HTTPException(status_code=400, detail="decision must be 'approve' or 'deny'")
-    await _deliver_customer_decision(order_id, req.decision, source="order_page")
-    return {"status": "delivered", "decision": req.decision}
+    await _deliver_customer_decision(order_id, request.decision, source="order_page")
+    return {"status": "delivered", "decision": request.decision}
 
 
 @app.get("/api/orders/{order_id}/pending-decision")
@@ -718,13 +744,15 @@ async def orders_stream():
         while True:
             try:
                 orders = []
-                async for wf in client.list_workflows(query='WorkflowType = "OrderWorkflow"'):
-                    orders.append(_wf_to_order(wf))
+                async for workflow_execution in client.list_workflows(
+                    query='WorkflowType = "OrderWorkflow"',
+                ):
+                    orders.append(_wf_to_order(workflow_execution))
 
                 data = json.dumps(orders)
                 yield f"data: {data}\n\n"
-            except Exception as e:
-                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            except Exception as error:
+                yield f"data: {json.dumps({'error': str(error)})}\n\n"
 
             await asyncio.sleep(3)
 

@@ -60,36 +60,36 @@ async def send_customer_confirmation_email(input: SendConfirmationEmailInput) ->
     """Send the confirmation email via SMTP. Returns the Message-ID for audit."""
     plain, html = _render_email(input)
 
-    msg = EmailMessage()
-    msg["Subject"] = f"Action needed for your Flourish & Blotts order {input.order_id}"
-    msg["From"] = HITL_FROM_EMAIL
-    msg["To"] = input.to_email
+    email_message = EmailMessage()
+    email_message["Subject"] = f"Action needed for your Flourish & Blotts order {input.order_id}"
+    email_message["From"] = HITL_FROM_EMAIL
+    email_message["To"] = input.to_email
     message_id = email.utils.make_msgid(domain="flourish-and-blotts.test")
-    msg["Message-ID"] = message_id
-    msg.set_content(plain)
-    msg.add_alternative(html, subtype="html")
+    email_message["Message-ID"] = message_id
+    email_message.set_content(plain)
+    email_message.add_alternative(html, subtype="html")
 
     try:
         await aiosmtplib.send(
-            msg,
+            email_message,
             hostname=SMTP_HOST,
             port=SMTP_PORT,
             timeout=15,
         )
-    except aiosmtplib.SMTPResponseException as e:
+    except aiosmtplib.SMTPResponseException as error:
         # 4xx SMTP errors are transient; 5xx are permanent per RFC 5321.
-        if 500 <= (e.code or 0) < 600:
+        if 500 <= (error.code or 0) < 600:
             raise ApplicationError(
-                f"SMTP permanent failure ({e.code}): {e.message}",
+                f"SMTP permanent failure ({error.code}): {error.message}",
                 type="SMTPPermanentError",
                 non_retryable=True,
             )
         raise ApplicationError(
-            f"SMTP transient failure ({e.code}): {e.message}",
+            f"SMTP transient failure ({error.code}): {error.message}",
             type="SMTPTransientError",
         )
-    except (aiosmtplib.SMTPConnectError, aiosmtplib.SMTPServerDisconnected) as e:
-        raise ApplicationError(f"SMTP connection error: {e}", type="SMTPConnectionError")
+    except (aiosmtplib.SMTPConnectError, aiosmtplib.SMTPServerDisconnected) as error:
+        raise ApplicationError(f"SMTP connection error: {error}", type="SMTPConnectionError")
 
     activity.logger.info(
         "Sent customer HITL email for order %s to %s (Message-ID %s)",
