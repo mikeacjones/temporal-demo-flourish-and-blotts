@@ -26,10 +26,10 @@ class ToolCategory(str, Enum):
 class ToolDef:
     """Declarative description of one agent-visible tool.
 
-    Exactly one of `impl` or `interaction` must be set:
-      * `impl` is an @activity.defn function — runs as a Temporal activity.
-      * `interaction` is a workflow-safe coroutine — runs in the workflow,
-        used for HITL_INTERACTION tools and workflow-state-only tools.
+    Exactly one of `impl`, `interaction`, or `body` must be set:
+      * `impl` is an @activity.defn function — runs as a Temporal activity. (Legacy)
+      * `interaction` is a workflow-safe coroutine taking (tool_use, ctx). (Legacy)
+      * `body` is a workflow-safe coroutine taking (args, ToolCtx). (New, decorator-driven)
     """
     name: str
     description: str
@@ -38,12 +38,13 @@ class ToolDef:
     guards: tuple["Guard", ...] = ()
     impl: Optional[Callable] = None
     interaction: Optional["HitlInteraction"] = None
+    body: Optional[Callable] = None
     timeout: timedelta = timedelta(seconds=30)
     # Only valid for HITL_INTERACTION tools. When True, run_agent_turn
     # terminates the loop after this tool runs successfully.
     terminates_loop: bool = False
     # Optional builder that produces the activity's input from
-    # (validated args, tool_use, agent_ctx). Default is identity. Use this when the
+    # (validated args, tool_use, ctx). Default is identity. Use this when the
     # activity needs harness metadata Claude doesn't supply (tool_use_id) or
     # when the activity's input shape differs from the tool's args (e.g. a
     # ToolCallInput wrapping name + args + order_id for execute_repair_tool).
