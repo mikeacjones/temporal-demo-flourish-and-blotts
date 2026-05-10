@@ -1,9 +1,13 @@
 """Activities for the Slack ops-agent.
 
-Read activities query the Temporal Visibility API and the in-process catalog.
-Mutation activities (cancel_order, adjust_inventory) and Slack-targeting
-activities (post_confirmation_card, post_order_picker, collapse_buttons) live
-later in this file — added in subsequent tasks.
+Slack-targeting activities (post_confirmation_card, post_order_picker,
+collapse_buttons, post_thread_reply, post_thread_closed_notice) are registered
+with the Temporal worker and called from non-tool workflows.
+
+Idempotency caches (_cancel_idempotency_cache, _adjust_idempotency_cache) and
+the lazy Temporal client (_get_client) are shared with the per-tool activity
+bodies in worker/agent/tools/cancel_order.py and
+worker/agent/tools/adjust_inventory.py which import them by name.
 
 The Temporal client is lazily constructed and cached at module level. For
 tests, monkeypatch `_get_client` to return a stub.
@@ -11,52 +15,26 @@ tests, monkeypatch `_get_client` to return a stub.
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
-from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import httpx
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from temporalio import activity
 from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
-from temporalio.exceptions import ApplicationError
 
-from shared.catalog import CATALOG, get_book_by_id
 from shared.models import (
-    AdjustInventoryInput,
     AdjustInventoryResult,
-    AggregateFailuresInput,
-    AggregateFailuresResult,
-    CancelOrderInput,
     CancelOrderResult,
     CollapseButtonsInput,
-    DescribeOrderInput,
-    DescribeOrderResult,
-    DescribeWorkflowInput,
-    DescribeWorkflowResult,
-    GetWorkflowHistoryInput,
-    GetWorkflowHistoryResult,
-    RelatedWorkflowSummary,
-    WorkflowHistoryEvent,
-    FailureBucket,
-    GetBookInput,
-    GetBookResult,
-    InventoryItem,
-    ListInventoryResult,
-    ListOrdersInput,
-    ListOrdersResult,
-    OrderSummary,
     PostCardResult,
     PostConfirmationCardInput,
     PostOrderPickerInput,
     PostThreadClosedNoticeInput,
-    PostRichThreadReplyInput,
     PostThreadReplyInput,
     PostThreadReplyResult,
 )
-from worker.config import API_BASE_URL, SLACK_BOT_TOKEN, TEMPORAL_HOST, TEMPORAL_NAMESPACE
+from worker.config import SLACK_BOT_TOKEN, TEMPORAL_HOST, TEMPORAL_NAMESPACE
 
 
 _client: Optional[Client] = None
@@ -77,377 +55,15 @@ async def _get_client() -> Client:
     return _client
 
 
-def _first(search_attributes: dict, search_attribute_name: str) -> str:
-    """Search-attribute values are lists in Temporal — pull the first scalar."""
-    attribute_value = search_attributes.get(search_attribute_name)
-    if isinstance(attribute_value, list):
-        return str(attribute_value[0]) if attribute_value else ""
-    if attribute_value is None:
-        return ""
-    return str(attribute_value)
-
-
-def _since_clause(since_hours: Optional[int]) -> str:
-    if not since_hours:
-        return ""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
-    return f" AND StartTime > '{cutoff.isoformat()}'"
-
-
-async def list_orders(input: ListOrdersInput) -> ListOrdersResult:
-    """List orders, optionally filtered by status/failure_type/age.
-
-    OrderStatus filtering note: states like `awaiting_customer`, `awaiting_ops`,
-    `awaiting_hitl`, `repair_in_progress` live on CHILD workflows
-    (OrderRepairWorkflow, SlackConversationWorkflow), not the parent
-    OrderWorkflow. So when a status filter is specified, we drop the
-    WorkflowType filter and let any matching workflow type qualify, then
-    dedupe by OrderId so each logical order appears once.
-    """
-    client = await _get_client()
-
-    parts: list[str] = []
-    if input.status:
-        # No WorkflowType filter — the matching state may be on a child workflow.
-        parts.append(f"OrderStatus='{input.status}'")
-    else:
-        # No status filter: default to top-level orders only.
-        parts.append("WorkflowType='OrderWorkflow'")
-    if input.failure_type:
-        parts.append(f"FailureType='{input.failure_type}'")
-    query = " AND ".join(parts) + _since_clause(input.since_hours)
-
-    # Fetch a generous page so dedupe doesn't starve the limit.
-    fetch_cap = input.limit * 3 if input.status else input.limit
-    by_order: dict[str, OrderSummary] = {}
-    async for workflow_execution in client.list_workflows(query=query, limit=fetch_cap):
-        search_attributes = workflow_execution.search_attributes or {}
-        order_id = _first(search_attributes, "OrderId")
-        if not order_id:
-            continue
-        if order_id in by_order:
-            continue  # already have a row for this order
-        by_order[order_id] = OrderSummary(
-            order_id=order_id,
-            workflow_id=workflow_execution.id,
-            workflow_type=workflow_execution.workflow_type,
-            status=str(workflow_execution.status),
-            order_status=_first(search_attributes, "OrderStatus"),
-        )
-        if len(by_order) >= input.limit:
-            break
-
-    return ListOrdersResult(orders=list(by_order.values()))
-
-
-def _flatten_sa(search_attributes: dict) -> dict:
-    """Render Temporal search attributes as plain key→scalar/list of scalars.
-    Useful when serializing for the agent."""
-    flattened = {}
-    for search_attribute_name, attribute_value in (search_attributes or {}).items():
-        if isinstance(attribute_value, list):
-            if len(attribute_value) == 1:
-                flattened[search_attribute_name] = attribute_value[0]
-            else:
-                flattened[search_attribute_name] = list(attribute_value)
-        else:
-            flattened[search_attribute_name] = attribute_value
-    return flattened
-
-
-async def describe_order(input: DescribeOrderInput) -> DescribeOrderResult:
-    """Describe the OrderWorkflow plus every workflow tagged with the same
-    OrderId search attribute (repair workflow, customer-confirmation child,
-    slack-conversation HITL child). The parent OrderWorkflow's search
-    attributes are stale once it's awaiting a child workflow — the child's
-    attributes reflect the live HITL/repair state, so we surface them here.
-
-    OrderWorkflow IDs are deterministic in this codebase: order_id maps to
-    workflow_id `order-{order_id}`.
-    """
-    client = await _get_client()
-    workflow_id = f"order-{input.order_id}"
-    handle = client.get_workflow_handle(workflow_id)
-    workflow_description = await handle.describe()
-
-    # Find every other workflow tagged with this OrderId.
-    related: list[RelatedWorkflowSummary] = []
-    async for workflow_execution in client.list_workflows(query=f"OrderId='{input.order_id}'"):
-        if workflow_execution.id == workflow_id:
-            continue
-        related.append(
-            RelatedWorkflowSummary(
-                workflow_id=workflow_execution.id,
-                workflow_type=workflow_execution.workflow_type,
-                status=str(workflow_execution.status),
-                search_attributes=_flatten_sa(workflow_execution.search_attributes or {}),
-            )
-        )
-
-    return DescribeOrderResult(
-        order_id=input.order_id,
-        workflow_id=workflow_id,
-        status=str(workflow_description.status),
-        start_time_iso=workflow_description.start_time.isoformat() if workflow_description.start_time else "",
-        close_time_iso=workflow_description.close_time.isoformat() if workflow_description.close_time else "",
-        search_attributes=_flatten_sa(workflow_description.search_attributes or {}),
-        related_workflows=related,
-    )
-
-
-async def describe_workflow(input: DescribeWorkflowInput) -> DescribeWorkflowResult:
-    """Describe ANY workflow by ID — useful when the agent has a workflow_id
-    from describe_order's related_workflows or list_orders and wants to drill in.
-    Distinct from describe_order which is order_id-keyed."""
-    client = await _get_client()
-    handle = client.get_workflow_handle(input.workflow_id)
-    workflow_description = await handle.describe()
-    return DescribeWorkflowResult(
-        workflow_id=input.workflow_id,
-        workflow_type=workflow_description.workflow_type,
-        status=str(workflow_description.status),
-        start_time_iso=workflow_description.start_time.isoformat() if workflow_description.start_time else "",
-        close_time_iso=workflow_description.close_time.isoformat() if workflow_description.close_time else "",
-        search_attributes=_flatten_sa(workflow_description.search_attributes or {}),
-    )
-
-
-def _summarize_event(event) -> "WorkflowHistoryEvent":
-    """Render a Temporal HistoryEvent proto as a small structured summary.
-    Pulls the most useful per-type detail (activity type name, signal name,
-    failure message, child workflow id) without dumping full proto payloads —
-    keeps the response tight for the agent's context."""
-    from temporalio.api.enums.v1 import EventType
-
-    event_type_name = EventType.Name(event.event_type) if event.event_type else "Unknown"
-    summary = ""
-    try:
-        if event_type_name == "EVENT_TYPE_ACTIVITY_TASK_SCHEDULED":
-            event_attributes = event.activity_task_scheduled_event_attributes
-            summary = f"activity={event_attributes.activity_type.name}"
-        elif event_type_name == "EVENT_TYPE_ACTIVITY_TASK_FAILED":
-            event_attributes = event.activity_task_failed_event_attributes
-            summary = f"failure={event_attributes.failure.message[:200]}"
-        elif event_type_name == "EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED":
-            event_attributes = event.workflow_execution_signaled_event_attributes
-            summary = f"signal={event_attributes.signal_name}"
-        elif event_type_name == "EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED":
-            event_attributes = event.start_child_workflow_execution_initiated_event_attributes
-            summary = f"child_id={event_attributes.workflow_id} type={event_attributes.workflow_type.name}"
-        elif event_type_name == "EVENT_TYPE_CHILD_WORKFLOW_EXECUTION_COMPLETED":
-            event_attributes = event.child_workflow_execution_completed_event_attributes
-            summary = f"child_id={event_attributes.workflow_execution.workflow_id}"
-        elif event_type_name == "EVENT_TYPE_WORKFLOW_EXECUTION_FAILED":
-            event_attributes = event.workflow_execution_failed_event_attributes
-            summary = f"failure={event_attributes.failure.message[:200]}"
-        elif event_type_name == "EVENT_TYPE_TIMER_STARTED":
-            event_attributes = event.timer_started_event_attributes
-            duration_seconds = (
-                event_attributes.start_to_fire_timeout.seconds
-                if event_attributes.start_to_fire_timeout
-                else 0
-            )
-            summary = f"timer_id={event_attributes.timer_id} duration_s={duration_seconds}"
-        elif event_type_name == "EVENT_TYPE_UPSERT_WORKFLOW_SEARCH_ATTRIBUTES":
-            event_attributes = event.upsert_workflow_search_attributes_event_attributes
-            search_attribute_keys = list(
-                (event_attributes.search_attributes.indexed_fields or {}).keys()
-            )
-            summary = f"keys={search_attribute_keys}"
-    except Exception:
-        # If anything in the proto layout differs, fall back to type name only.
-        pass
-
-    timestamp = ""
-    if event.event_time:
-        try:
-            timestamp = event.event_time.ToDatetime().isoformat() + "Z"
-        except Exception:
-            pass
-
-    # Strip "EVENT_TYPE_" prefix for readability.
-    short_type = event_type_name.removeprefix("EVENT_TYPE_") if hasattr(event_type_name, "removeprefix") else event_type_name
-    return WorkflowHistoryEvent(
-        event_id=event.event_id,
-        timestamp_iso=timestamp,
-        event_type=short_type,
-        summary=summary,
-    )
-
-
-async def get_workflow_history(input: GetWorkflowHistoryInput) -> GetWorkflowHistoryResult:
-    """Return a structured summary of a workflow's event history. The agent
-    uses this to understand exactly what happened in a workflow — which
-    activities ran, which signals arrived, which children were started, etc.
-    Bounded by `max_events` (default 200) to keep responses tight."""
-    client = await _get_client()
-    handle = client.get_workflow_handle(input.workflow_id)
-    events: list[WorkflowHistoryEvent] = []
-    truncated = False
-    history = await handle.fetch_history()
-    for event in history.events:
-        if len(events) >= input.max_events:
-            truncated = True
-            break
-        events.append(_summarize_event(event))
-    return GetWorkflowHistoryResult(
-        workflow_id=input.workflow_id,
-        events=events,
-        truncated=truncated,
-    )
-
-
-async def aggregate_repair_failures(input: AggregateFailuresInput) -> AggregateFailuresResult:
-    """List recent OrderRepairWorkflows and bucket them by FailureType search attribute."""
-    client = await _get_client()
-    query = "WorkflowType='OrderRepairWorkflow'" + _since_clause(input.since_hours)
-
-    counter: Counter = Counter()
-    async for workflow_execution in client.list_workflows(query=query):
-        failure_type = _first((workflow_execution.search_attributes or {}), "FailureType") or "unknown"
-        counter[failure_type] += 1
-
-    buckets = [
-        FailureBucket(failure_type=failure_type, count=count)
-        for failure_type, count in counter.most_common()
-    ]
-    return AggregateFailuresResult(buckets=buckets, total=sum(counter.values()))
-
-
-async def _fetch_catalog_from_api() -> list[dict]:
-    """Pull the canonical catalog (with live `in_stock` from the API process).
-    The worker's `shared.catalog.CATALOG` is stale once the API mutates state
-    via reserve/release/adjust — so all reads go through HTTP."""
-    async with httpx.AsyncClient(timeout=10.0) as http:
-        response = await http.get(f"{API_BASE_URL}/api/catalog")
-        response.raise_for_status()
-        return response.json()
-
-
-async def list_inventory() -> ListInventoryResult:
-    catalog_items = await _fetch_catalog_from_api()
-    items = [
-        InventoryItem(
-            book_id=book_data["id"],
-            title=book_data["title"],
-            author=book_data["author"],
-            in_stock=book_data["in_stock"],
-            physical_in_stock=book_data.get("physical_in_stock"),
-            category=book_data["category"],
-        )
-        for book_data in catalog_items
-    ]
-    return ListInventoryResult(items=items)
-
-
-async def get_book(input: GetBookInput) -> GetBookResult:
-    catalog_items = await _fetch_catalog_from_api()
-    matching_book = next(
-        (book_data for book_data in catalog_items if book_data["id"] == input.book_id),
-        None,
-    )
-    if matching_book is None:
-        return GetBookResult(found=False, item=None)
-    return GetBookResult(
-        found=True,
-        item=InventoryItem(
-            book_id=matching_book["id"],
-            title=matching_book["title"],
-            author=matching_book["author"],
-            in_stock=matching_book["in_stock"],
-            physical_in_stock=matching_book.get("physical_in_stock"),
-            category=matching_book["category"],
-        ),
-    )
-
-
 # ---------------------------------------------------------------------------
-# Mutation activities — gated by Block-Kit confirmation in the workflow layer.
-# Idempotency: tool_use_id (Claude-generated, deterministic across replay) is
-# tracked in a process-memory set. On replay or repeat invocation, the prior
-# result is returned and no second mutation occurs. Sufficient for the demo.
+# Idempotency caches shared with per-tool activity bodies.
+# worker/agent/tools/cancel_order.py and worker/agent/tools/adjust_inventory.py
+# import these by name so that repeated tool invocations across workflow replay
+# are de-duplicated in a single process-memory store.
 # ---------------------------------------------------------------------------
 
 _cancel_idempotency_cache: dict[str, CancelOrderResult] = {}
 _adjust_idempotency_cache: dict[str, AdjustInventoryResult] = {}
-
-
-async def cancel_order(input: CancelOrderInput) -> CancelOrderResult:
-    cached = _cancel_idempotency_cache.get(input.tool_use_id)
-    if cached is not None:
-        return cached
-
-    client = await _get_client()
-    workflow_id = f"order-{input.order_id}"
-    handle = client.get_workflow_handle(workflow_id)
-    try:
-        await handle.cancel()
-    except Exception as error:
-        # Cancelling something that doesn't exist or is already closed: surface
-        # to the agent as a non-retryable error so the executor wraps it as
-        # is_error=True and the agent sees a clear message.
-        raise ApplicationError(
-            f"cancel_order failed for '{input.order_id}': {error}",
-            type="OrderCancelFailed",
-            non_retryable=True,
-        )
-
-    result = CancelOrderResult(
-        cancelled=True,
-        note=f"Order {input.order_id} cancellation requested. Reason: {input.reason}",
-    )
-    _cancel_idempotency_cache[input.tool_use_id] = result
-    return result
-
-
-async def adjust_inventory(input: AdjustInventoryInput) -> AdjustInventoryResult:
-    """Apply an inventory delta. Routes through the API so the storefront and
-    every other reader (worker, agent) see the same canonical in_stock count.
-    tool_use_id is sent as the API's idempotency_key so that workflow replay
-    or activity retry doesn't double-apply."""
-    cached = _adjust_idempotency_cache.get(input.tool_use_id)
-    if cached is not None:
-        return cached
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as http:
-            response = await http.post(
-                f"{API_BASE_URL}/api/inventory/adjust",
-                json={
-                    "book_id": input.book_id,
-                    "delta": input.delta,
-                    "reason": input.reason,
-                    "idempotency_key": input.tool_use_id,
-                },
-            )
-            if response.status_code == 400:
-                detail = response.json().get("detail", "unknown error")
-                raise ApplicationError(
-                    f"adjust_inventory: {detail}",
-                    type="UnknownBook",
-                    non_retryable=True,
-                )
-            response.raise_for_status()
-            data = response.json()
-    except ApplicationError:
-        raise
-    except Exception as error:
-        # Transient / network error — let Temporal retry.
-        raise ApplicationError(
-            f"adjust_inventory API call failed: {error}",
-            type="ApiError",
-        )
-
-    new_count = int(data.get("in_stock", 0))
-    book = get_book_by_id(input.book_id)  # local catalog only used for friendly title
-    title = book.title if book else input.book_id
-    result = AdjustInventoryResult(
-        applied=True,
-        new_in_stock=new_count,
-        note=f"Stock for '{title}' adjusted by {input.delta:+d} → {new_count}. Reason: {input.reason}",
-    )
-    _adjust_idempotency_cache[input.tool_use_id] = result
-    return result
 
 
 # ---------------------------------------------------------------------------
@@ -573,23 +189,6 @@ async def post_thread_reply(input: PostThreadReplyInput) -> PostThreadReplyResul
             channel=input.channel,
             thread_ts=input.thread_ts,
             text=input.text,
-        )
-    except SlackApiError as error:
-        return PostThreadReplyResult(is_error=True, error_message=str(error))
-    return PostThreadReplyResult(message_ts=response["ts"])
-
-
-async def post_rich_thread_reply(input: PostRichThreadReplyInput) -> PostThreadReplyResult:
-    """Post a Block-Kit reply in the ops-agent thread. SlackApiError (e.g.
-    invalid_blocks) is RETURNED as is_error so the agent can self-correct on
-    its next turn — same pattern as the rest of the Slack-targeting activities."""
-    client = AsyncWebClient(token=SLACK_BOT_TOKEN)
-    try:
-        response = await client.chat_postMessage(
-            channel=input.channel,
-            thread_ts=input.thread_ts,
-            blocks=input.blocks,
-            text=input.fallback_text or "(rich reply)",
         )
     except SlackApiError as error:
         return PostThreadReplyResult(is_error=True, error_message=str(error))
