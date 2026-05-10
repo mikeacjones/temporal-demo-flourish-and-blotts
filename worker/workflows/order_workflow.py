@@ -93,6 +93,10 @@ class OrderWorkflow:
 
         self._status = OrderStatus.COMPENSATING
         workflow.upsert_search_attributes({"OrderStatus": [OrderStatus.COMPENSATING.value]})
+        workflow.set_current_details(
+            f"Rolling back {len(self._pending_compensations)} step(s) for order "
+            f"`{order.order_id}` after repair could not resolve the failure."
+        )
 
         # Reverse so newer steps compensate first.
         for forward_step, compensation_name in reversed(self._pending_compensations):
@@ -105,6 +109,7 @@ class OrderWorkflow:
                         forward_step=forward_step,
                     ),
                     start_to_close_timeout=COMPENSATION_TIMEOUT,
+                    summary=f"Compensate `{forward_step}` for {order.order_id}",
                 )
                 self._compensations_executed.append(f"{compensation_name}: {result}")
             except ActivityError as error:
@@ -124,6 +129,9 @@ class OrderWorkflow:
             "dispatch_delivery": dispatch_delivery,
         }
 
+        # Single initial upsert covers every stable-at-start facet plus the
+        # zero-value mutables. Per-step OrderStatus is upserted inside the loop
+        # below so visibility can show "where this order is right now".
         workflow.upsert_search_attributes({
             "OrderId": [order.order_id],
             "CustomerName": [order.customer_name],
@@ -132,7 +140,13 @@ class OrderWorkflow:
             "FailureType": [FailureType.NONE.value],
             "RequiresHITL": [False],
             "RepairAttempts": [0],
+            "DeliveryMethod": [order.delivery_method],
         })
+        workflow.set_current_details(
+            f"Order `{order.order_id}` for {order.customer_name} — "
+            f"*{order.book_title}* ×{order.quantity} via "
+            f"`{order.delivery_method}`."
+        )
 
         self._status = OrderStatus.PROCESSING
         cancel_status: OrderStatus | None = None
@@ -148,6 +162,7 @@ class OrderWorkflow:
                         order,
                         start_to_close_timeout=STEP_TIMEOUT,
                         schedule_to_close_timeout=timedelta(minutes=5),
+                        summary=f"OMS step `{activity_name}` for {order.order_id}",
                     )
                     self._steps_completed.append(f"{activity_name}: {result}")
                     # Record the compensation for this step so we can roll back later.
@@ -173,11 +188,20 @@ class OrderWorkflow:
                             else FailureType.NONE
                         )
                         self._status = OrderStatus.REPAIR_IN_PROGRESS
+                        self._repair_attempts += 1
 
+                        # Single upsert covers status + failure type + new
+                        # attempt count — all known at this point.
                         workflow.upsert_search_attributes({
                             "OrderStatus": [OrderStatus.REPAIR_IN_PROGRESS.value],
                             "FailureType": [failure_type],
+                            "RepairAttempts": [self._repair_attempts],
                         })
+                        workflow.set_current_details(
+                            f"Order `{order.order_id}` failed at `{activity_name}` "
+                            f"with `{failure_type}` — repair agent is working "
+                            f"(attempt {self._repair_attempts})."
+                        )
 
                         repair_input = OrderRepairInput(
                             order_id=order.order_id,
@@ -190,17 +214,26 @@ class OrderWorkflow:
                             ),
                         )
 
-                        self._repair_attempts += 1
-                        workflow.upsert_search_attributes({
-                            "RepairAttempts": [self._repair_attempts],
-                        })
-
                         repair_result: OrderRepairResult = await workflow.execute_child_workflow(
                             OrderRepairWorkflow,
                             repair_input,
                             id=f"repair-{order.order_id}",
                             task_queue="flourish-blotts-oms",
                             execution_timeout=timedelta(hours=25),
+                            static_summary=(
+                                f"Repair `{order.order_id}` — "
+                                f"`{failure_type}` at `{activity_name}` "
+                                f"(attempt {self._repair_attempts})"
+                            ),
+                            static_details=(
+                                f"**Order:** `{order.order_id}` — "
+                                f"{order.customer_name}\n"
+                                f"**Book:** {order.book_title} (`{order.book_id}`) "
+                                f"×{order.quantity}\n"
+                                f"**Failed step:** `{activity_name}`\n"
+                                f"**Failure type:** `{failure_type}`\n"
+                                f"**Description:** {description}"
+                            ),
                         )
 
                         self._repair_outcome = repair_result.outcome
@@ -237,6 +270,7 @@ class OrderWorkflow:
                                 activity_fns[activity_name],
                                 order,
                                 start_to_close_timeout=STEP_TIMEOUT,
+                                summary=f"Retry `{activity_name}` after repair for {order.order_id}",
                             )
                             self._steps_completed.append(f"{activity_name} (after repair): {result}")
                             if activity_name in COMPENSATIONS:
@@ -253,9 +287,19 @@ class OrderWorkflow:
                 await self._run_compensations(order)
                 self._status = cancel_status
                 workflow.upsert_search_attributes({"OrderStatus": [cancel_status.value]})
+                workflow.set_current_details(
+                    f"Order `{order.order_id}` ended `{cancel_status.value}` — "
+                    f"{len(self._compensations_executed)} compensation(s) run. "
+                    f"{self._notes or ''}"
+                )
             else:
                 self._status = OrderStatus.COMPLETED
                 workflow.upsert_search_attributes({"OrderStatus": [OrderStatus.COMPLETED.value]})
+                workflow.set_current_details(
+                    f"Order `{order.order_id}` completed — "
+                    f"*{order.book_title}* ×{order.quantity} dispatched via "
+                    f"`{order.delivery_method}`."
+                )
 
         except BaseException:
             # Workflow was cancelled (or some other unexpected failure) mid-flight.

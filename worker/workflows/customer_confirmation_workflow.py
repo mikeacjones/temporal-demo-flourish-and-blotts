@@ -59,6 +59,10 @@ class CustomerConfirmationWorkflow:
             "OrderStatus": ["awaiting_customer"],
             "RequiresHITL": [True],
         })
+        workflow.set_current_details(
+            f"Awaiting customer decision on `{input.order_id}` — "
+            f"{input.question} (24h timeout)"
+        )
 
         # Mint signed Approve/Deny links. The workflow mints these rather than the
         # activity because they're deterministic for a given workflow (order_id +
@@ -83,6 +87,7 @@ class CustomerConfirmationWorkflow:
                 expires_at_iso=expires_at.isoformat(),
             ),
             start_to_close_timeout=EMAIL_TIMEOUT,
+            summary=f"Email decision request to {input.order_input.customer_email}",
         )
 
         # Wait for a decision, with a reminder resend at 4h if no response yet.
@@ -99,6 +104,10 @@ class CustomerConfirmationWorkflow:
         if self._decision is None:
             # 4h passed with no response — send a reminder, then wait the rest.
             # Same signed URLs; the email is idempotent from the customer's view.
+            workflow.set_current_details(
+                f"Customer has not responded after 4h — sent reminder to "
+                f"{input.order_input.customer_email}. Waiting up to 20h more."
+            )
             await workflow.execute_activity(
                 send_customer_confirmation_email,
                 SendConfirmationEmailInput(
@@ -112,6 +121,7 @@ class CustomerConfirmationWorkflow:
                     expires_at_iso=expires_at.isoformat(),
                 ),
                 start_to_close_timeout=EMAIL_TIMEOUT,
+                summary=f"Resend reminder to {input.order_input.customer_email}",
             )
             try:
                 await workflow.wait_condition(

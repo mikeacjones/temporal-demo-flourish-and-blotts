@@ -67,6 +67,21 @@ class SlackConversationWorkflow:
     async def run(self, input: SlackConversationInput) -> SlackConversationResult:
         current_plan = input.initial_plan
 
+        # Store context for operational visibility upfront so visibility queries
+        # can find this workflow even before the Slack post completes. The Slack
+        # bot itself does not use a search attribute to find this workflow — its
+        # workflow ID is deterministic (slack-conv-{order_id}).
+        workflow.upsert_search_attributes({
+            "OrderId": [input.order_id],
+            "OrderStatus": ["awaiting_hitl"],
+            "FailureType": [input.failure.failure_type],
+        })
+        workflow.set_current_details(
+            f"Posting plan for `{input.order_id}` "
+            f"(`{input.failure.failure_type}` at `{input.failure.step}`) to "
+            f"`{input.slack_channel}` and awaiting an operator decision."
+        )
+
         # Post the initial Slack message and store the thread timestamp
         self._thread_ts = await workflow.execute_activity(
             post_initial_slack_message,
@@ -79,14 +94,8 @@ class SlackConversationWorkflow:
                 workflow_id=workflow.info().workflow_id,
             ),
             start_to_close_timeout=SLACK_TIMEOUT,
+            summary=f"Post repair plan for `{input.order_id}` to `{input.slack_channel}`",
         )
-
-        # Store context for operational visibility. The Slack bot does not use a search
-        # attribute to find this workflow — its workflow ID is deterministic (slack-conv-{order_id}).
-        workflow.upsert_search_attributes({
-            "OrderId": [input.order_id],
-            "OrderStatus": ["awaiting_hitl"],
-        })
 
         # Main conversation loop
         while not self._resolved:
@@ -145,6 +154,7 @@ class SlackConversationWorkflow:
                         history=self._history,
                     ),
                     start_to_close_timeout=CLAUDE_TIMEOUT,
+                    summary=f"Interpret operator reply on `{input.order_id}` (Claude)",
                 )
 
                 if process_result.updated_plan:
@@ -169,6 +179,10 @@ class SlackConversationWorkflow:
                         workflow_id=workflow.info().workflow_id,
                     ),
                     start_to_close_timeout=SLACK_TIMEOUT,
+                    summary=(
+                        f"Reply in thread for `{input.order_id}`"
+                        + (" (plan updated)" if process_result.updated_plan else "")
+                    ),
                 )
 
         # _resolved was set by receive_slack_action signal

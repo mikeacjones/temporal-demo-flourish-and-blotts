@@ -217,6 +217,12 @@ class OrderRepairWorkflow:
             "OrderStatus": ["repair_in_progress"],
             "FailureType": [input.failure.failure_type],
         })
+        workflow.set_current_details(
+            f"Repair agent diagnosing `{input.failure.failure_type}` on "
+            f"`{input.failure.step}` for order `{input.order_id}` "
+            f"({input.order_input.book_title} ×{input.order_input.quantity}). "
+            f"{input.failure.description}"
+        )
 
         repair_state = RepairAgentState()
         agent_ctx = AgentCtx(domain_input=input, domain_state=repair_state)
@@ -230,6 +236,7 @@ class OrderRepairWorkflow:
             tools=REPAIR_TOOLS,
             agent_ctx=agent_ctx,
             max_iterations=MAX_AGENT_ITERATIONS,
+            agent_label="repair",
         )
 
         return _shape_repair_result(turn, repair_state, input)

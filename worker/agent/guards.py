@@ -76,6 +76,7 @@ async def ops_confirmation(tool_use: ClaudeToolUse, agent_ctx: AgentCtx) -> Guar
                 description=description,
             ),
             start_to_close_timeout=SLACK_TIMEOUT,
+            summary=f"Confirm `{tool_use.name}` with operator before running",
         )
         if post_result.is_error:
             return Reject(
@@ -94,6 +95,7 @@ async def ops_confirmation(tool_use: ClaudeToolUse, agent_ctx: AgentCtx) -> Guar
             summary_line=f"{summary} — {tool_use.name}",
         ),
         start_to_close_timeout=SLACK_TIMEOUT,
+        summary=f"Collapse confirmation card after `{decision}`",
     )
 
     if decision == "confirm":
@@ -147,6 +149,19 @@ async def substitute_item_customer_confirmation(
         id=f"customer-confirm-{repair_input.order_id}",
         task_queue="flourish-blotts-oms",
         execution_timeout=timedelta(hours=25),
+        static_summary=(
+            f"Ask customer to swap `{args.original_item_id}` → "
+            f"`{args.substitute_item_id}` on `{repair_input.order_id}`"
+        ),
+        static_details=(
+            f"**Order:** `{repair_input.order_id}` — "
+            f"{repair_input.order_input.customer_name}\n"
+            f"**Original:** {repair_input.order_input.book_title} "
+            f"(`{args.original_item_id}`) — out of stock\n"
+            f"**Substitute:** {substitute_title} "
+            f"(`{args.substitute_item_id}`)\n"
+            f"**Reason:** {args.reason}"
+        ),
     )
     if customer_result.status == "approved":
         return Pass()

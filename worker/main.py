@@ -63,6 +63,9 @@ SEARCH_ATTRIBUTES = {
     "RepairOutcome": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
     "RequiresHITL": IndexedValueType.INDEXED_VALUE_TYPE_BOOL,
     "RepairAttempts": IndexedValueType.INDEXED_VALUE_TYPE_INT,
+    # Stable per-order facet — set once at workflow start, never mutated.
+    # Lets ops filter "all owl_post failures" or compare repair rates by channel.
+    "DeliveryMethod": IndexedValueType.INDEXED_VALUE_TYPE_KEYWORD,
 }
 
 

@@ -390,12 +390,30 @@ async def place_order(request: PlaceOrderRequest):
 
     try:
         client = await get_client()
+        forced = (
+            f" — *forced failure:* `{order.forced_failure}`"
+            if order.forced_failure else ""
+        )
         await client.start_workflow(
             OrderWorkflow.run,
             order,
             id=f"order-{order_id}",
             task_queue=TASK_QUEUE,
             execution_timeout=timedelta(hours=26),
+            static_summary=(
+                f"Order `{order_id}` — {order.customer_name} — "
+                f"{book.title} ×{order.quantity} via `{order.delivery_method}`"
+            ),
+            static_details=(
+                f"**Order:** `{order_id}`\n"
+                f"**Customer:** {order.customer_name} "
+                f"(`{order.customer_email}`)\n"
+                f"**Book:** {book.title} (`{order.book_id}`) ×"
+                f"{order.quantity}\n"
+                f"**Delivery:** `{order.delivery_method}` → "
+                f"{order.delivery_address}"
+                f"{forced}"
+            ),
         )
     except Exception as error:
         # Workflow start failed — release the reservation we just made so
@@ -456,12 +474,29 @@ async def bulk_orders(request: BulkOrderRequest):
         )
 
         try:
+            forced = (
+                f" — *forced failure:* `{order.forced_failure}`"
+                if order.forced_failure else ""
+            )
             await client.start_workflow(
                 OrderWorkflow.run,
                 order,
                 id=f"order-{order_id}",
                 task_queue=TASK_QUEUE,
                 execution_timeout=timedelta(hours=26),
+                static_summary=(
+                    f"Order `{order_id}` (bulk) — {order.customer_name} — "
+                    f"{book.title} via `{order.delivery_method}`"
+                ),
+                static_details=(
+                    f"**Order:** `{order_id}` (from bulk batch)\n"
+                    f"**Customer:** {order.customer_name} "
+                    f"(`{order.customer_email}`)\n"
+                    f"**Book:** {book.title} (`{order.book_id}`)\n"
+                    f"**Delivery:** `{order.delivery_method}` → "
+                    f"{order.delivery_address}"
+                    f"{forced}"
+                ),
             )
             started.append(order_id)
         except Exception:

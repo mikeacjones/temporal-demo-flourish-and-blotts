@@ -88,6 +88,15 @@ async def request_customer_confirmation_interaction(
         id=f"customer-confirm-{repair_input.order_id}",
         task_queue="flourish-blotts-oms",
         execution_timeout=timedelta(hours=25),
+        static_summary=f"Ask customer about `{repair_input.order_id}` — {args.question}",
+        static_details=(
+            f"**Order:** `{repair_input.order_id}` — "
+            f"{repair_input.order_input.customer_name} "
+            f"(`{repair_input.order_input.customer_email}`)\n"
+            f"**Proposed action:** {args.proposed_action}\n"
+            f"**Question:** {args.question}\n\n"
+            f"{args.description}"
+        ),
     )
 
     if customer_result.status in ("denied", "timeout"):
@@ -124,6 +133,10 @@ async def post_order_picker_interaction(
         list_orders,
         ListOrdersInput(status=args.status_filter),
         start_to_close_timeout=READ_TOOL_TIMEOUT,
+        summary=(
+            "Fetch order picker options"
+            + (f" (status=`{args.status_filter}`)" if args.status_filter else "")
+        ),
     )
     if not list_result.orders:
         return ToolResult(
@@ -150,6 +163,7 @@ async def post_order_picker_interaction(
                 options=options,
             ),
             start_to_close_timeout=SLACK_TIMEOUT,
+            summary=f"Post picker ({len(options)} orders) and await operator selection",
         )
         if post_result.is_error:
             return ToolResult(
@@ -169,6 +183,7 @@ async def post_order_picker_interaction(
             summary_line=f"📌 Selected: {selected}",
         ),
         start_to_close_timeout=SLACK_TIMEOUT,
+        summary=f"Collapse picker after selection of `{selected}`",
     )
     return ToolResult(tool_use_id=tool_use.id, content=f"Operator selected order_id={selected}")
 
@@ -212,6 +227,21 @@ async def escalate_to_human_interaction(
         id=f"slack-conv-{repair_input.order_id}",
         task_queue="flourish-blotts-oms",
         execution_timeout=timedelta(hours=25),
+        static_summary=(
+            f"Escalate `{repair_input.order_id}` "
+            f"(`{repair_input.failure.failure_type}`, urgency `{args.urgency}`) "
+            f"to ops"
+        ),
+        static_details=(
+            f"**Order:** `{repair_input.order_id}` — "
+            f"{repair_input.order_input.book_title} ×"
+            f"{repair_input.order_input.quantity}\n"
+            f"**Failure:** `{repair_input.failure.failure_type}` at "
+            f"`{repair_input.failure.step}`\n"
+            f"**Urgency:** `{args.urgency}`\n"
+            f"**Proposed steps:** {len(args.proposed_plan)}\n\n"
+            f"_Rationale:_ {args.rationale}"
+        ),
     )
 
     plan_steps_executed: list[str] = []
@@ -226,6 +256,7 @@ async def escalate_to_human_interaction(
                 execute_approved_plan_step,
                 args=[step, repair_input.order_id],
                 start_to_close_timeout=step_timeout,
+                summary=f"Approved plan step `{step.tool}` on `{repair_input.order_id}`",
             )
             plan_steps_executed.append(f"{step.action}: {step_result}")
         if report.skipped:

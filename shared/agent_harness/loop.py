@@ -75,6 +75,10 @@ async def dispatch_tool(
             return ToolResult(tool_use_id=tool_use.id, content=outcome.reason)
 
     # 3. Run the impl (activity) or interaction (workflow coroutine).
+    # Per-activity summary surfaces the *tool* name in workflow history — the
+    # underlying activity is often the generic `execute_repair_tool` dispatcher
+    # that handles many tools, so the activity name alone is opaque.
+    activity_summary = f"tool `{tool_def.name}`"
     if tool_def.impl is not None:
         try:
             if tool_def.make_impl_input is not None:
@@ -84,11 +88,15 @@ async def dispatch_tool(
                 impl_input = tool_def.make_impl_input(args, tool_use, agent_ctx)
                 if impl_input is None:
                     result = await workflow.execute_activity(
-                        tool_def.impl, start_to_close_timeout=tool_def.timeout,
+                        tool_def.impl,
+                        start_to_close_timeout=tool_def.timeout,
+                        summary=activity_summary,
                     )
                 else:
                     result = await workflow.execute_activity(
-                        tool_def.impl, impl_input, start_to_close_timeout=tool_def.timeout,
+                        tool_def.impl, impl_input,
+                        start_to_close_timeout=tool_def.timeout,
+                        summary=activity_summary,
                     )
             elif not tool_def.args_model.model_fields:
                 # Parameterless args model (e.g. list_inventory's
@@ -96,12 +104,16 @@ async def dispatch_tool(
                 # arg. Activities defined as `async def f() -> ...` would
                 # otherwise raise TypeError.
                 result = await workflow.execute_activity(
-                    tool_def.impl, start_to_close_timeout=tool_def.timeout,
+                    tool_def.impl,
+                    start_to_close_timeout=tool_def.timeout,
+                    summary=activity_summary,
                 )
             else:
                 # Default: pass the validated Pydantic args through.
                 result = await workflow.execute_activity(
-                    tool_def.impl, args, start_to_close_timeout=tool_def.timeout,
+                    tool_def.impl, args,
+                    start_to_close_timeout=tool_def.timeout,
+                    summary=activity_summary,
                 )
             return ToolResult(tool_use_id=tool_use.id, content=str(result))
         except Exception as error:
@@ -138,11 +150,16 @@ async def run_agent_turn(
     max_iterations: int = 10,
     claude_timeout: timedelta = timedelta(seconds=60),
     claude_retry: RetryPolicy = DEFAULT_CLAUDE_RETRY,
+    agent_label: str = "agent",
 ) -> TurnResult:
     """Run the agent loop until end_turn / terminating_tool / max_iterations.
 
     Each iteration: call Claude, append the assistant message, dispatch any
     tool_uses (in parallel via the existing executor), append tool results.
+
+    `agent_label` distinguishes invocations of the otherwise-generic
+    `call_claude` activity in workflow history — e.g. "repair iter 2/10"
+    vs "ops iter 1/8".
     """
     tools_by_name = {tool_def.name: tool_def for tool_def in tools}
     anthropic_tools = [tool_def.to_anthropic_schema() for tool_def in tools]
@@ -154,6 +171,10 @@ async def run_agent_turn(
             CallClaudeInput(messages=messages, system=system, tools=anthropic_tools),
             start_to_close_timeout=claude_timeout,
             retry_policy=claude_retry,
+            summary=(
+                f"{agent_label} iter {iteration_index + 1}/{max_iterations} "
+                f"({len(messages)} msgs)"
+            ),
         )
         messages.append({"role": "assistant", "content": response.content})
 

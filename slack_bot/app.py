@@ -218,6 +218,9 @@ async def handle_app_mention(event, say):
     # message is signalled to it; if not, the workflow starts and immediately
     # receives the signal as its first inbox entry.
     try:
+        # static_summary/details only take effect on the *first* signalWithStart
+        # — subsequent calls into an already-running workflow ignore them, so
+        # this describes the conversation as opened, not the latest message.
         await client.start_workflow(
             OpsAgentConversationWorkflow.run,
             OpsAgentConversationInput(
@@ -228,6 +231,15 @@ async def handle_app_mention(event, say):
             task_queue=TASK_QUEUE,
             start_signal="receive_slack_message",
             start_signal_args=[message_signal],
+            static_summary=(
+                f"Ops agent — {user_name} in `{channel}`"
+            ),
+            static_details=(
+                f"**Operator:** {user_name} (`{user_id}`)\n"
+                f"**Channel:** `{channel}`\n"
+                f"**Thread:** `{thread_ts}`\n\n"
+                f"_Opening message:_ {text}"
+            ),
         )
         log.info(f"Started or signalled ops-agent workflow {workflow_id}")
     except Exception as error:

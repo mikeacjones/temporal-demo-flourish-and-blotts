@@ -62,6 +62,18 @@ class OpsAgentConversationWorkflow:
         )
         system = build_ops_system_prompt(input.user_name)
 
+        # OrderId is unknown here — the operator's questions may span many
+        # orders or none — so we only tag this workflow by its kind so it
+        # shows up under the same OrderStatus filter as other live workflows.
+        # Single upsert keeps this cheap; never re-upserted during the loop.
+        workflow.upsert_search_attributes({
+            "OrderStatus": ["ops_conversation"],
+        })
+        workflow.set_current_details(
+            f"Ops agent conversation with *{input.user_name}* in "
+            f"`{input.channel}` (thread `{input.thread_ts}`). Idle timeout 24h."
+        )
+
         while not self._closed:
             try:
                 await workflow.wait_condition(
@@ -76,6 +88,7 @@ class OpsAgentConversationWorkflow:
                         channel=input.channel, thread_ts=input.thread_ts,
                     ),
                     start_to_close_timeout=SLACK_TIMEOUT,
+                    summary=f"Notify {input.user_name} thread auto-closed (idle 24h)",
                 )
                 return "idle_timeout"
 
@@ -92,6 +105,7 @@ class OpsAgentConversationWorkflow:
                 tools=OPS_TOOLS,
                 agent_ctx=self._agent_ctx,
                 max_iterations=MAX_TOOL_TURNS_PER_MESSAGE,
+                agent_label="ops",
             )
 
             if turn.final_text:
@@ -108,6 +122,7 @@ class OpsAgentConversationWorkflow:
                         text=turn.final_text,
                     ),
                     start_to_close_timeout=SLACK_TIMEOUT,
+                    summary=f"Post agent reply to {input.user_name}",
                 )
                 if reply_result.is_error:
                     workflow.logger.warning(
