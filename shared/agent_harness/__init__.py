@@ -34,6 +34,12 @@ from shared.agent_harness.loop import (
     dispatch_tool,
     run_agent_turn,
 )
+from shared.agent_harness.decorators import (
+    OPS_TOOLS,
+    REPAIR_TOOLS,
+    ops_tool,
+    repair_tool,
+)
 
 __all__ = [
     "AgentCtx",
@@ -45,7 +51,9 @@ __all__ = [
     "GuardOutcome",
     "HUMAN_CONFIRMATION_KINDS",
     "HitlInteraction",
+    "OPS_TOOLS",
     "Pass",
+    "REPAIR_TOOLS",
     "Reject",
     "TOOL_HANDLERS",
     "ToolCategory",
@@ -58,7 +66,9 @@ __all__ = [
     "dispatch_tool",
     "dispatch_tool_activity",
     "guard",
+    "ops_tool",
     "register_tool",
+    "repair_tool",
     "run_agent_turn",
     "validate_tool",
 ]
