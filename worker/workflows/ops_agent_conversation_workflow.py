@@ -18,7 +18,7 @@ with workflow.unsafe.imports_passed_through():
         post_thread_closed_notice,
         post_thread_reply,
     )
-    from worker.agent.ops_tools import OPS_TOOLS, build_ops_system_prompt
+    from worker.agent.tools import OPS_TOOLS, build_ops_system_prompt
 
 
 IDLE_TIMEOUT = timedelta(days=1)

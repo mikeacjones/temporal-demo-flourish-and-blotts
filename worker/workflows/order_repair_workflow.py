@@ -14,7 +14,7 @@ with workflow.unsafe.imports_passed_through():
         OrderRepairResult,
     )
     from worker.agent.repair_state import RepairAgentState
-    from worker.agent.repair_tools import REPAIR_TOOLS
+    from worker.agent.tools import REPAIR_TOOLS
 
 
 MAX_AGENT_ITERATIONS = 10

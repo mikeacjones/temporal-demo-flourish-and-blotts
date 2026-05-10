@@ -18,6 +18,7 @@ from pathlib import Path
 
 from shared.agent_harness.decorators import OPS_TOOLS, REPAIR_TOOLS
 from shared.agent_harness.registry import TOOL_HANDLERS, _resolve_arg_type
+from worker.agent.tools._prompts import build_ops_system_prompt
 
 # Kept here from the legacy worker/agent/tools.py for SlackConversationWorkflow.
 # This constant will be removed when tools.py is deleted in Task 8.
@@ -96,4 +97,4 @@ for _info in pkgutil.iter_modules([str(_pkg_path)]):
     _register_module_subactivities(_module)
 
 
-__all__ = ["REPAIR_TOOLS", "OPS_TOOLS", "CONVERSATION_TOOLS"]
+__all__ = ["REPAIR_TOOLS", "OPS_TOOLS", "CONVERSATION_TOOLS", "build_ops_system_prompt"]

@@ -25,7 +25,6 @@ from worker.activities.compensation_activities import (
     recall_delivery,
 )
 from worker.activities.claude_activities import call_claude
-from worker.activities.repair_activities import execute_approved_plan_step
 from shared.agent_harness import dispatch_tool_activity
 from worker.activities.slack_activities import (
     post_initial_slack_message,
@@ -101,7 +100,6 @@ async def main() -> None:
             recall_delivery,
             call_claude,
             dispatch_tool_activity,
-            execute_approved_plan_step,
             post_initial_slack_message,
             post_slack_reply,
             process_conversation_message,
