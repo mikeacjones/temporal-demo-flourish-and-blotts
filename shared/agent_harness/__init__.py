@@ -26,6 +26,7 @@ from shared.agent_harness.registry import (
 )
 from shared.agent_harness.ctx import AgentCtx
 from shared.agent_harness.dispatch_activity import dispatch_tool_activity
+from shared.agent_harness.tool_ctx import ToolCtx, derive_activity_name
 from shared.agent_harness.loop import (
     DEFAULT_CLAUDE_RETRY,
     ExecutedTool,
@@ -48,10 +49,12 @@ __all__ = [
     "Reject",
     "TOOL_HANDLERS",
     "ToolCategory",
+    "ToolCtx",
     "ToolDef",
     "ToolPolicyError",
     "TurnResult",
     "call_tool_handler",
+    "derive_activity_name",
     "dispatch_tool",
     "dispatch_tool_activity",
     "guard",
