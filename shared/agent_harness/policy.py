@@ -40,23 +40,25 @@ def validate_tool(tool: ToolDef) -> None:
     """Check structural invariants and category policy for a ToolDef.
 
     Structural:
-      * Exactly one of `impl` and `interaction` is set.
+      * Exactly one of `impl`, `interaction`, or `body` is set.
       * `terminates_loop=True` is only allowed for HITL_INTERACTION.
-      * HITL_INTERACTION tools must use `interaction`, not `impl`.
+      * HITL_INTERACTION tools may not use `impl` (must use `interaction` or `body`).
     Policy:
       * For categories listed in CATEGORY_POLICIES with required kinds, at
         least one guard of one of the required kinds must be present.
     """
     has_impl = tool.impl is not None
     has_interaction = tool.interaction is not None
-    if has_impl == has_interaction:
+    has_body = tool.body is not None
+    set_count = sum([has_impl, has_interaction, has_body])
+    if set_count != 1:
         raise ToolPolicyError(
-            f"Tool {tool.name!r}: exactly one of impl/interaction must be set "
-            f"(got impl={has_impl}, interaction={has_interaction})"
+            f"Tool {tool.name!r}: exactly one of impl/interaction/body must be set "
+            f"(got impl={has_impl}, interaction={has_interaction}, body={has_body})"
         )
     if tool.category == ToolCategory.HITL_INTERACTION and has_impl:
         raise ToolPolicyError(
-            f"HITL_INTERACTION tool {tool.name!r} must use `interaction`, not `impl`"
+            f"HITL_INTERACTION tool {tool.name!r} must use `interaction` or `body`, not `impl`"
         )
     if tool.terminates_loop and tool.category != ToolCategory.HITL_INTERACTION:
         raise ToolPolicyError(
@@ -66,10 +68,10 @@ def validate_tool(tool: ToolDef) -> None:
     required = CATEGORY_POLICIES.get(tool.category, frozenset())
     if not required:
         return
-    present = {getattr(guard_fn, "kind", None) for guard_fn in tool.guards}
+    present = {getattr(g, "kind", None) for g in tool.guards}
     if not (present & required):
         raise ToolPolicyError(
             f"Tool {tool.name!r} (category={tool.category.value}) needs "
-            f"at least one guard of kind {sorted(kind.value for kind in required)}; "
-            f"has {sorted(kind.value for kind in present if kind)}"
+            f"at least one guard of kind {sorted(k.value for k in required)}; "
+            f"has {sorted(k.value for k in present if k)}"
         )

@@ -57,8 +57,16 @@ def _resolve_arg_type(handler: ToolHandler) -> tuple[bool, type | None]:
 
 
 def register_tool(tool: ToolDef) -> ToolDef:
-    """Validate the ToolDef and (if it has an `impl`) register the handler."""
+    """Validate the ToolDef and (if it has an `impl`) register the handler.
+
+    Body-based ToolDefs (the decorator-driven path) are NOT added to
+    TOOL_HANDLERS — their bodies run inline in workflow context, not as
+    activities. Only `impl`-based legacy ToolDefs populate TOOL_HANDLERS;
+    `interaction`-based and `body`-based ToolDefs leave it untouched.
+    """
     validate_tool(tool)
+    # body-based ToolDefs intentionally fall through here — they run inline
+    # in workflow context and do not need a TOOL_HANDLERS entry.
     if tool.impl is not None:
         existing = TOOL_HANDLERS.get(tool.name)
         if existing is not None and existing[0] is not tool.impl:

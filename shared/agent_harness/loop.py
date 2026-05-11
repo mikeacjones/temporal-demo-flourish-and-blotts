@@ -17,6 +17,7 @@ from temporalio.common import RetryPolicy
 with workflow.unsafe.imports_passed_through():
     from shared.agent_harness.ctx import AgentCtx
     from shared.agent_harness.guards import Reject
+    from shared.agent_harness.tool_ctx import ToolCtx
     from shared.agent_harness.tooldef import ToolDef
     from shared.models import (
         CallClaudeInput,
@@ -74,13 +75,23 @@ async def dispatch_tool(
         if isinstance(outcome, Reject):
             return ToolResult(tool_use_id=tool_use.id, content=outcome.reason)
 
-    # 3. Run the impl (activity) or interaction (workflow coroutine).
+    # 3. Run the body (workflow coroutine), impl (activity), or interaction.
+
+    if tool_def.body is not None:
+        try:
+            tool_ctx = ToolCtx(tool_use=tool_use, agent=agent_ctx)
+            result = await tool_def.body(args, tool_ctx)
+            return ToolResult(tool_use_id=tool_use.id, content=str(result))
+        except Exception as error:
+            return ToolResult(
+                tool_use_id=tool_use.id,
+                is_error=True,
+                content=f"Tool {tool_use.name!r} failed: {error}",
+            )
+
     if tool_def.impl is not None:
         try:
             if tool_def.make_impl_input is not None:
-                # Custom adapter — pass whatever it returns as the activity's
-                # single positional arg. (Returning None is supported for
-                # activities that take no args.)
                 impl_input = tool_def.make_impl_input(args, tool_use, agent_ctx)
                 if impl_input is None:
                     result = await workflow.execute_activity(
@@ -91,15 +102,10 @@ async def dispatch_tool(
                         tool_def.name, impl_input, start_to_close_timeout=tool_def.timeout,
                     )
             elif not tool_def.args_model.model_fields:
-                # Parameterless args model (e.g. list_inventory's
-                # ListInventoryArgs) — call the activity with no positional
-                # arg. Activities defined as `async def f() -> ...` would
-                # otherwise raise TypeError.
                 result = await workflow.execute_activity(
                     tool_def.name, start_to_close_timeout=tool_def.timeout,
                 )
             else:
-                # Default: pass the validated Pydantic args through.
                 result = await workflow.execute_activity(
                     tool_def.name, args, start_to_close_timeout=tool_def.timeout,
                 )
@@ -125,7 +131,7 @@ async def dispatch_tool(
     return ToolResult(
         tool_use_id=tool_use.id,
         is_error=True,
-        content=f"Tool {tool_use.name!r} has neither impl nor interaction",
+        content=f"Tool {tool_use.name!r} has neither body nor impl nor interaction",
     )
 
 

@@ -26,12 +26,19 @@ from shared.agent_harness.registry import (
 )
 from shared.agent_harness.ctx import AgentCtx
 from shared.agent_harness.dispatch_activity import dispatch_tool_activity
+from shared.agent_harness.tool_ctx import ToolCtx, derive_activity_name
 from shared.agent_harness.loop import (
     DEFAULT_CLAUDE_RETRY,
     ExecutedTool,
     TurnResult,
     dispatch_tool,
     run_agent_turn,
+)
+from shared.agent_harness.decorators import (
+    OPS_TOOLS,
+    REPAIR_TOOLS,
+    ops_tool,
+    repair_tool,
 )
 
 __all__ = [
@@ -44,18 +51,24 @@ __all__ = [
     "GuardOutcome",
     "HUMAN_CONFIRMATION_KINDS",
     "HitlInteraction",
+    "OPS_TOOLS",
     "Pass",
+    "REPAIR_TOOLS",
     "Reject",
     "TOOL_HANDLERS",
     "ToolCategory",
+    "ToolCtx",
     "ToolDef",
     "ToolPolicyError",
     "TurnResult",
     "call_tool_handler",
+    "derive_activity_name",
     "dispatch_tool",
     "dispatch_tool_activity",
     "guard",
+    "ops_tool",
     "register_tool",
+    "repair_tool",
     "run_agent_turn",
     "validate_tool",
 ]
