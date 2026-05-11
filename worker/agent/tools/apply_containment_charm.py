@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import random
+from dataclasses import dataclass
 from datetime import timedelta
 
 from temporalio import activity, workflow
@@ -23,18 +23,27 @@ with workflow.unsafe.imports_passed_through():
 _DEFAULT_TIMEOUT = timedelta(seconds=30)
 
 
-async def _apply_charm(item_id: str, item_title: str) -> str:
+@dataclass
+class _ApplyCharmInput:
+    item_id: str
+    item_title: str
+    total_steps: int
+    delays: list[float]
+    outcome_variant: int
+
+
+async def _apply_charm(input: _ApplyCharmInput) -> str:
     """Long-running stub — simulates wand-work and heartbeats progress."""
-    total_steps = random.randint(3, 6)
-    for step in range(total_steps):
-        await asyncio.sleep(random.uniform(0.3, 0.7))
-        activity.heartbeat(f"applying charm — step {step + 1}/{total_steps}")
-    return random.choice([
-        f"Containment charm applied successfully to '{item_title}'. Item subdued and "
+    for step, delay in enumerate(input.delays, start=1):
+        await asyncio.sleep(delay)
+        activity.heartbeat(f"applying charm — step {step}/{input.total_steps}")
+    outcomes = [
+        f"Containment charm applied successfully to '{input.item_title}'. Item subdued and "
         "ready for repackaging with dragon-hide reinforced box.",
-        f"Enhanced containment charm applied to '{item_title}'. Three attempts required — "
+        f"Enhanced containment charm applied to '{input.item_title}'. Three attempts required — "
         "book resisted. Now secured with Unbreakable Charm reinforcement.",
-    ])
+    ]
+    return outcomes[input.outcome_variant]
 
 
 @repair_tool(category=ToolCategory.AUTONOMOUS, timeout=_DEFAULT_TIMEOUT)
@@ -49,9 +58,17 @@ Use for Monster Book of Monsters escapes or other dangerous book incidents. \
 The charm restrains the item and makes it safe for repackaging."""
     book = get_book_by_id(args.item_id)
     title = book.title if book else args.item_id
+    rng = workflow.random()
+    total_steps = rng.randint(3, 6)
     outcome = await ctx.activity(
         _apply_charm,
-        args.item_id, title,
+        _ApplyCharmInput(
+            item_id=args.item_id,
+            item_title=title,
+            total_steps=total_steps,
+            delays=[rng.uniform(0.3, 0.7) for _ in range(total_steps)],
+            outcome_variant=rng.randrange(2),
+        ),
         summary=f"Apply containment charm to {title!r} for order {args.order_id}.",
         start_to_close_timeout=_DEFAULT_TIMEOUT,
         heartbeat_timeout=timedelta(seconds=10),

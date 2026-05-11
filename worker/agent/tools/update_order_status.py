@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import random
+from dataclasses import dataclass
 from datetime import timedelta
 
 from temporalio import workflow
@@ -22,10 +22,18 @@ with workflow.unsafe.imports_passed_through():
 _DEFAULT_TIMEOUT = timedelta(seconds=30)
 
 
-async def _update_oms_status(order_id: str, status: str, message: str) -> str:
+@dataclass
+class _UpdateStatusInput:
+    order_id: str
+    status: str
+    message: str
+    delay: float
+
+
+async def _update_oms_status(input: _UpdateStatusInput) -> str:
     """Stub — write the status update to the OMS."""
-    await asyncio.sleep(random.uniform(0.2, 0.5))
-    return f"Order {order_id} status updated to '{status}': {message}"
+    await asyncio.sleep(input.delay)
+    return f"Order {input.order_id} status updated to '{input.status}': {input.message}"
 
 
 @repair_tool(category=ToolCategory.AUTONOMOUS, timeout=_DEFAULT_TIMEOUT)
@@ -36,9 +44,15 @@ async def _update_oms_status(order_id: str, status: str, message: str) -> str:
 )
 async def update_order_status(args: UpdateOrderStatusArgs, ctx: ToolCtx) -> str:
     """Update the status and add a note to an order in the OMS."""
+    rng = workflow.random()
     return await ctx.activity(
         _update_oms_status,
-        args.order_id, args.status, args.message,
+        _UpdateStatusInput(
+            order_id=args.order_id,
+            status=args.status,
+            message=args.message,
+            delay=rng.uniform(0.2, 0.5),
+        ),
         summary=f"Update order {args.order_id} status to '{args.status}'.",
         start_to_close_timeout=_DEFAULT_TIMEOUT,
     )

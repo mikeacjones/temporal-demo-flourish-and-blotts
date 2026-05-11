@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Optional
 
 from temporalio import workflow
@@ -21,11 +21,16 @@ with workflow.unsafe.imports_passed_through():
 _READ_TIMEOUT = timedelta(seconds=10)
 
 
-def _since_clause(since_hours: Optional[int]) -> str:
+def _start_time_after_iso(since_hours: Optional[int]) -> str | None:
     if not since_hours:
+        return None
+    return (workflow.now() - timedelta(hours=since_hours)).isoformat()
+
+
+def _since_clause(start_time_after_iso: Optional[str]) -> str:
+    if not start_time_after_iso:
         return ""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
-    return f" AND StartTime > '{cutoff.isoformat()}'"
+    return f" AND StartTime > '{start_time_after_iso}'"
 
 
 def _first(search_attributes: dict, search_attribute_name: str) -> str:
@@ -53,7 +58,7 @@ async def _aggregate_failures(input: AggregateFailuresInput) -> AggregateFailure
         data_converter=pydantic_data_converter,
     )
 
-    query = "WorkflowType='OrderRepairWorkflow'" + _since_clause(input.since_hours)
+    query = "WorkflowType='OrderRepairWorkflow'" + _since_clause(input.start_time_after_iso)
     counter: Counter = Counter()
     async for workflow_execution in client.list_workflows(query=query):
         failure_type = _first((workflow_execution.search_attributes or {}), "FailureType") or "unknown"
@@ -70,7 +75,10 @@ async def _aggregate_failures(input: AggregateFailuresInput) -> AggregateFailure
 async def aggregate_repair_failures(args: AggregateRepairFailuresArgs, ctx: ToolCtx) -> str:
     """Group recent OrderRepairWorkflows by FailureType and return counts —
     useful for answering 'what's been breaking lately?'"""
-    input = AggregateFailuresInput(since_hours=args.since_hours)
+    input = AggregateFailuresInput(
+        since_hours=args.since_hours,
+        start_time_after_iso=_start_time_after_iso(args.since_hours),
+    )
     result = await ctx.activity(
         _aggregate_failures,
         input,

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Optional
 
 from temporalio import workflow
@@ -21,11 +21,16 @@ with workflow.unsafe.imports_passed_through():
 _READ_TIMEOUT = timedelta(seconds=10)
 
 
-def _since_clause(since_hours: Optional[int]) -> str:
+def _start_time_after_iso(since_hours: Optional[int]) -> str | None:
     if not since_hours:
+        return None
+    return (workflow.now() - timedelta(hours=since_hours)).isoformat()
+
+
+def _since_clause(start_time_after_iso: Optional[str]) -> str:
+    if not start_time_after_iso:
         return ""
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
-    return f" AND StartTime > '{cutoff.isoformat()}'"
+    return f" AND StartTime > '{start_time_after_iso}'"
 
 
 def _first(search_attributes: dict, search_attribute_name: str) -> str:
@@ -60,7 +65,7 @@ async def _fetch_orders(input: ListOrdersInput) -> ListOrdersResult:
         parts.append("WorkflowType='OrderWorkflow'")
     if input.failure_type:
         parts.append(f"FailureType='{input.failure_type}'")
-    query = " AND ".join(parts) + _since_clause(input.since_hours)
+    query = " AND ".join(parts) + _since_clause(input.start_time_after_iso)
 
     fetch_cap = input.limit * 3 if input.status else input.limit
     by_order: dict[str, OrderSummary] = {}
@@ -97,6 +102,7 @@ async def list_orders(args: ListOrdersArgs, ctx: ToolCtx) -> str:
         status=args.status,
         failure_type=args.failure_type,
         since_hours=args.since_hours,
+        start_time_after_iso=_start_time_after_iso(args.since_hours),
         limit=args.limit,
     )
     result = await ctx.activity(

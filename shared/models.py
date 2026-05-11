@@ -406,6 +406,7 @@ class ListOrdersInput:
     failure_type: Optional[str] = None
     since_hours: Optional[int] = None
     limit: int = 50
+    start_time_after_iso: Optional[str] = None
 
 
 @dataclass
@@ -491,6 +492,7 @@ class GetWorkflowHistoryResult:
 @dataclass
 class AggregateFailuresInput:
     since_hours: Optional[int] = None
+    start_time_after_iso: Optional[str] = None
 
 
 @dataclass
